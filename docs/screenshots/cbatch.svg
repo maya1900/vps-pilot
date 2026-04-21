@@ -1,0 +1,19 @@
+<svg width="1200" height="720" viewBox="0 0 1200 720" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="1200" height="720" rx="24" fill="#0B1020"/>
+  <rect x="36" y="36" width="1128" height="648" rx="18" fill="#0F172A" stroke="#1E293B" stroke-width="2"/>
+  <circle cx="76" cy="76" r="10" fill="#EF4444"/>
+  <circle cx="106" cy="76" r="10" fill="#F59E0B"/>
+  <circle cx="136" cy="76" r="10" fill="#10B981"/>
+  <text x="170" y="83" fill="#CBD5E1" font-family="Menlo, Consolas, monospace" font-size="24">Container Batch Session</text>
+  <text x="72" y="148" fill="#E2E8F0" font-family="Menlo, Consolas, monospace" font-size="28">进入容器批量命令会话，目标: oc1，容器: myapp</text>
+  <text x="72" y="208" fill="#67E8F9" font-family="Menlo, Consolas, monospace" font-size="26">cbatch(oc1/myapp)&gt; ls</text>
+  <text x="72" y="248" fill="#A7F3D0" font-family="Menlo, Consolas, monospace" font-size="26">快捷词展开: ls -lah</text>
+  <text x="72" y="298" fill="#F8FAFC" font-family="Menlo, Consolas, monospace" font-size="26">total 48</text>
+  <text x="72" y="332" fill="#F8FAFC" font-family="Menlo, Consolas, monospace" font-size="26">drwxr-xr-x  1 app app 4096 Apr 21  /app</text>
+  <text x="72" y="366" fill="#F8FAFC" font-family="Menlo, Consolas, monospace" font-size="26">-rw-r--r--  1 app app  512 Apr 21  .env</text>
+  <text x="72" y="400" fill="#22C55E" font-family="Menlo, Consolas, monospace" font-size="26">[OK] oc1</text>
+  <text x="72" y="460" fill="#67E8F9" font-family="Menlo, Consolas, monospace" font-size="26">cbatch(oc1/myapp)&gt; :history</text>
+  <text x="72" y="500" fill="#F8FAFC" font-family="Menlo, Consolas, monospace" font-size="26">[1] ls -lah</text>
+  <text x="72" y="534" fill="#F8FAFC" font-family="Menlo, Consolas, monospace" font-size="26">[2] env | sort</text>
+  <text x="72" y="594" fill="#FCD34D" font-family="Menlo, Consolas, monospace" font-size="24">每条命令都会自动包装为 docker exec &lt;container&gt; sh -lc '&lt;cmd&gt;'</text>
+</svg>

@@ -1,8 +1,14 @@
 # VPS Pilot
 
+[![Release](https://img.shields.io/github/v/release/maya1900/vps-pilot?display_name=tag)](https://github.com/maya1900/vps-pilot/releases)
+[![License](https://img.shields.io/github/license/maya1900/vps-pilot)](./LICENSE)
+[![Stars](https://img.shields.io/github/stars/maya1900/vps-pilot?style=flat)](https://github.com/maya1900/vps-pilot/stargazers)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-2563eb)](./README.md)
+[![Shell](https://img.shields.io/badge/shell-bash-121011?logo=gnu-bash)](./vps)
+
 多台 VPS 的本地统一控制工具。
 
-- 版本：`v0.0.1`
+- 版本：`v0.0.2`
 - 作者：`markyal`
 - 主命令：`vps`
 
@@ -20,6 +26,20 @@
 - 提供适合中文使用习惯的交互提示与菜单入口
 
 本项目默认运行在本地终端环境，所有操作均基于 SSH 到目标主机执行，请在确认目标主机、用户和权限配置正确后使用。
+
+---
+
+## 界面截图
+
+以下截图为项目当前命令行交互示意：
+
+### 主菜单
+
+![主菜单截图](./docs/screenshots/menu.svg)
+
+### 容器批量会话
+
+![容器批量会话截图](./docs/screenshots/cbatch.svg)
 
 ---
 
@@ -53,14 +73,13 @@
 
 ## 快速开始
 
-### 1. 克隆项目
+推荐按以下顺序完成初始化：
 
-```bash
-git clone <your-repo-url> vps-pilot
-cd vps-pilot
-```
+1. 编写服务器配置
+2. 同步 SSH 公钥
+3. 开始使用命令或菜单
 
-### 2. 准备配置文件
+### 第一步：编写服务器配置
 
 复制示例配置：
 
@@ -84,56 +103,62 @@ oc2|root|192.168.1.11|22|-
 - `端口`：SSH 端口，默认一般为 `22`
 - `私钥路径`：SSH 私钥路径；若暂时未知，可填写 `-`
 
-### 3. 给予执行权限
+建议先执行一次配置校验：
 
-macOS / Linux：
+```bash
+vps validate
+```
+
+### 第二步：同步公钥
+
+如果远程主机还没有配置免密登录，请先确认本机已有 SSH 公钥，例如：
+
+```bash
+~/.ssh/id_ed25519.pub
+```
+
+然后逐台同步：
+
+```bash
+vps copy-key oc1
+vps copy-key oc2
+```
+
+同步完成后，可优先测试 SSH 登录：
+
+```bash
+vps ssh oc1
+```
+
+### 第三步：开始使用
+
+```bash
+vps
+vps list
+vps status
+vps batch all
+```
+
+---
+
+## 安装与运行
+
+### macOS / Linux
+
+给予执行权限：
 
 ```bash
 chmod +x "./vps" "./vpsctl"
 ```
 
-说明：
-
-- 这一步主要用于让脚本可以直接作为可执行文件运行
-- 在 macOS 和大多数 Linux 环境中，这样写是正常的
-
-Windows：
-
-- 推荐通过 `Git Bash` 或 `WSL` 使用本项目
-- 在 `Git Bash` / `WSL` 中，可以执行上面的 `chmod +x`
-- 项目已内置 Windows 包装器：
-  - `vps.cmd`
-  - `vps.ps1`
-- 在 `cmd` / `PowerShell` 中运行时，它们会自动尝试调用 `bash`
-- 如果只想临时运行，也可以直接使用：
-
-```bash
-bash ./vps
-```
-
-### 4. 开始使用
-
 如果当前目录就是项目目录，可以直接运行：
-
-```bash
-vps
-vps list
-vps validate
-```
-
-如果你的环境还没有把 `vps` 加入 `PATH`，也可以这样运行：
 
 ```bash
 ./vps
 ./vps list
-./vps validate
 ```
 
-### 5. 在任意目录运行
-
-是否可以在任意目录直接输入 `vps`，取决于 `vps` 是否已经加入当前系统的 `PATH`。
-
-macOS / Linux：
+如需在任意目录运行：
 
 ```bash
 mkdir -p "$HOME/.local/bin"
@@ -145,12 +170,21 @@ ln -sfn "$(pwd)/vps" "$HOME/.local/bin/vps"
 - `~/.local/bin` 已经在你的 `PATH` 中
 - 如果项目目录被移动了，需要重新建立链接
 
-Windows：
+### Windows
 
-- 如果你通过 `WSL` 使用，可以按 Linux 方式处理
-- 如果你通过 `Git Bash` 使用，通常可以直接在项目目录执行 `./vps` 或 `bash ./vps`
-- 如果你通过原生 `cmd` / `PowerShell` 使用，可以配合项目自带的 `vps.cmd` / `vps.ps1`
-- 若要在 Windows 任意目录直接输入 `vps`，需要把项目目录加入 `PATH`，或者把包装器放到已在 `PATH` 的目录中
+- 推荐通过 `Git Bash` 或 `WSL` 使用本项目
+- 项目已内置 Windows 包装器：
+  - `vps.cmd`
+  - `vps.ps1`
+- 在 `cmd` / `PowerShell` 中运行时，它们会自动尝试调用 `bash`
+
+临时运行：
+
+```bash
+bash ./vps
+```
+
+如果通过原生 `cmd` / `PowerShell` 使用，并希望任意目录直接输入 `vps`，需要将项目目录加入 `PATH`，或者把 `vps.cmd` / `vps.ps1` 放到已在 `PATH` 的目录。
 
 ---
 
@@ -213,13 +247,8 @@ VPSCTL_CONFIG=/path/to/servers.conf vps list
 
 ### 示例配置
 
-项目自带示例文件：
-
 - [servers.example.conf](./servers.example.conf)
-
-真实配置文件：
-
-- [servers.conf](./servers.conf)
+- `servers.conf`：你的本地实际配置文件，需要自行创建，不会进入仓库
 
 注意：真实 `servers.conf` 已被 `.gitignore` 忽略，默认不会进入仓库。
 
@@ -243,11 +272,6 @@ vps ssh oc1
 
 ```bash
 vps status
-```
-
-并发查看：
-
-```bash
 vps status --parallel
 ```
 
@@ -261,11 +285,6 @@ vps check
 
 ```bash
 vps run all -- docker ps
-```
-
-并发执行：
-
-```bash
 vps run all --parallel -- docker ps
 ```
 
@@ -414,6 +433,23 @@ vps
 
 ---
 
+## 下一版本开发清单
+
+下一版本计划见：
+
+- [ROADMAP.md](./ROADMAP.md)
+
+当前已整理的下一版本方向包括：
+
+- 主机分组与标签管理
+- 常用任务预设库
+- `status` / `check` 输出样式优化
+- 容器列表按运行状态分组
+- 更细粒度的 SSH 配置模板
+- 巡检结果导出能力
+
+---
+
 ## 版本信息
 
 查看当前版本：
@@ -425,7 +461,7 @@ vps version
 当前版本信息：
 
 - 项目名：`VPS Pilot`
-- 版本：`v0.0.1`
+- 版本：`v0.0.2`
 - 作者：`markyal`
 
 ---
@@ -436,10 +472,16 @@ vps version
 
 - [vps](./vps)：主脚本
 - [vpsctl](./vpsctl)：兼容入口
+- [vps.cmd](./vps.cmd)：Windows CMD 包装器
+- [vps.ps1](./vps.ps1)：Windows PowerShell 包装器
 - [README.md](./README.md)：项目说明
+- [CHANGELOG.md](./CHANGELOG.md)：版本变更记录
+- [ROADMAP.md](./ROADMAP.md)：下一版本开发清单
 - [servers.example.conf](./servers.example.conf)：示例配置
-- [servers.conf](./servers.conf)：本地实际配置
+- `servers.conf`：本地实际配置，不纳入仓库
+- [docs/screenshots](./docs/screenshots)：README 截图资源
 - [.gitignore](./.gitignore)：仓库忽略规则
+- [LICENSE](./LICENSE)：开源许可证
 
 ---
 
@@ -452,8 +494,9 @@ vps version
 - `vps.cmd`
 - `vps.ps1`
 - `README.md`
-- `LICENSE`
 - `CHANGELOG.md`
+- `ROADMAP.md`
+- `LICENSE`
 - `servers.example.conf`
 - `.gitignore`
 

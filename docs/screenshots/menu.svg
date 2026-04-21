@@ -1,0 +1,20 @@
+<svg width="1200" height="720" viewBox="0 0 1200 720" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="1200" height="720" rx="24" fill="#0F172A"/>
+  <rect x="36" y="36" width="1128" height="648" rx="18" fill="#111827" stroke="#1F2937" stroke-width="2"/>
+  <circle cx="76" cy="76" r="10" fill="#EF4444"/>
+  <circle cx="106" cy="76" r="10" fill="#F59E0B"/>
+  <circle cx="136" cy="76" r="10" fill="#10B981"/>
+  <text x="170" y="83" fill="#CBD5E1" font-family="Menlo, Consolas, monospace" font-size="24">VPS Pilot v0.0.2</text>
+  <text x="72" y="148" fill="#67E8F9" font-family="Menlo, Consolas, monospace" font-size="30">+--------------------------------------------------+</text>
+  <text x="72" y="188" fill="#E2E8F0" font-family="Menlo, Consolas, monospace" font-size="28">| VPS Pilot                                        |</text>
+  <text x="72" y="228" fill="#FCD34D" font-family="Menlo, Consolas, monospace" font-size="28">| v0.0.2 | by markyal                              |</text>
+  <text x="72" y="268" fill="#94A3B8" font-family="Menlo, Consolas, monospace" font-size="28">| cmd: vps                                         |</text>
+  <text x="72" y="308" fill="#94A3B8" font-family="Menlo, Consolas, monospace" font-size="28">| quick: list | ssh &lt;name&gt; | status | batch all   |</text>
+  <text x="72" y="348" fill="#67E8F9" font-family="Menlo, Consolas, monospace" font-size="30">+--------------------------------------------------+</text>
+  <text x="72" y="418" fill="#F8FAFC" font-family="Menlo, Consolas, monospace" font-size="30">[1] list       查看服务器列表</text>
+  <text x="72" y="458" fill="#F8FAFC" font-family="Menlo, Consolas, monospace" font-size="30">[2] status     查看全部机器状态</text>
+  <text x="72" y="498" fill="#F8FAFC" font-family="Menlo, Consolas, monospace" font-size="30">[7] batch      进入批量命令会话</text>
+  <text x="72" y="538" fill="#F8FAFC" font-family="Menlo, Consolas, monospace" font-size="30">[8] containers 查看某台机器的容器</text>
+  <text x="72" y="578" fill="#F8FAFC" font-family="Menlo, Consolas, monospace" font-size="30">[9] cbatch     进入容器批量命令会话</text>
+  <text x="72" y="640" fill="#22C55E" font-family="Menlo, Consolas, monospace" font-size="28">提示: 按任意键返回菜单</text>
+</svg>
