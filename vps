@@ -1,0 +1,1356 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+resolve_script_dir() {
+  local source="${BASH_SOURCE[0]}"
+  while [[ -L "${source}" ]]; do
+    local dir
+    dir="$(cd "$(dirname "${source}")" && pwd)"
+    source="$(readlink "${source}")"
+    [[ "${source}" != /* ]] && source="${dir}/${source}"
+  done
+  cd "$(dirname "${source}")" && pwd
+}
+
+SCRIPT_DIR="$(resolve_script_dir)"
+CONFIG_FILE="${VPSCTL_CONFIG:-${SCRIPT_DIR}/servers.conf}"
+HISTORY_FILE="${VPSCTL_HISTORY_FILE:-${SCRIPT_DIR}/.vps_batch_history}"
+APP_NAME="VPS Pilot"
+APP_VERSION="v0.0.1"
+APP_AUTHOR="markyal"
+APP_CMD="vps"
+APP_QUICK_HINT="list | ssh <name> | status | batch all | containers <name>"
+
+if ! command -v ssh >/dev/null 2>&1; then
+  echo "缺少 ssh 命令，先安装 OpenSSH 客户端。"
+  exit 1
+fi
+
+if [[ -t 1 ]]; then
+  STYLE_RESET=$'\033[0m'
+  STYLE_TITLE=$'\033[1;36m'
+  STYLE_LABEL=$'\033[1;33m'
+  STYLE_HINT=$'\033[2m'
+else
+  STYLE_RESET=""
+  STYLE_TITLE=""
+  STYLE_LABEL=""
+  STYLE_HINT=""
+fi
+
+BATCH_HISTORY_COUNT=0
+BATCH_HISTORY_ITEMS=()
+CAPTURED_REMOTE_OUTPUT=""
+CAPTURED_REMOTE_STATUS=0
+CONTAINER_LINES=()
+SELECTED_CONTAINER=""
+
+usage() {
+  cat <<EOF
+${APP_NAME} ${APP_VERSION}
+by ${APP_AUTHOR}
+
+直接输入:
+  ${APP_CMD}
+
+常用命令:
+  ${APP_CMD} list
+  ${APP_CMD} ssh <name>
+  ${APP_CMD} status [name|all] [--parallel]
+  ${APP_CMD} check [name|all] [--parallel]
+  ${APP_CMD} batch <name|all> [--parallel]
+  ${APP_CMD} containers <name>
+  ${APP_CMD} cbatch <name> [container]
+  ${APP_CMD} run <name|all> [--parallel] -- <command>
+  ${APP_CMD} update [name|all] [--parallel]
+  ${APP_CMD} upgrade [name|all] [--parallel]
+  ${APP_CMD} reboot [name|all]
+  ${APP_CMD} copy-key <name>
+  ${APP_CMD} validate
+  ${APP_CMD} version
+  ${APP_CMD} menu
+  ${APP_CMD} help
+
+命令说明:
+  list              查看服务器列表
+  ssh <name>        登录指定服务器
+  status [target]   查看在线状态和磁盘空间
+  check [target]    做一轮基础巡检，发现明显异常
+  batch [target]    进入批量命令会话，连续执行多条命令
+  containers        列出某台机器上的容器
+  cbatch            进入容器批量命令会话，命令自动在容器内执行
+  run <target> --   对一台或全部机器执行命令
+  update [target]   只刷新软件包索引
+  upgrade [target]  真正升级系统软件包
+  reboot [target]   重启一台或全部机器
+  copy-key <name>   写入本机公钥，方便免密登录
+  validate          检查配置文件有没有填错
+  version           查看版本和作者
+  menu              打开交互菜单
+  help              查看帮助
+
+配置文件:
+  默认读取当前目录下的 servers.conf
+  也可以通过环境变量 VPSCTL_CONFIG 指定其它路径
+EOF
+}
+
+print_banner() {
+  printf '%s\n' "${STYLE_TITLE}+--------------------------------------------------+${STYLE_RESET}"
+  printf '%s\n' "${STYLE_TITLE}| ${APP_NAME}${STYLE_RESET}"
+  printf '%s\n' "${STYLE_LABEL}| ${APP_VERSION} | by ${APP_AUTHOR}${STYLE_RESET}"
+  printf '%s\n' "${STYLE_HINT}| cmd: ${APP_CMD}${STYLE_RESET}"
+  printf '%s\n' "${STYLE_HINT}| quick: ${APP_QUICK_HINT}${STYLE_RESET}"
+  printf '%s\n' "${STYLE_TITLE}+--------------------------------------------------+${STYLE_RESET}"
+}
+
+print_quick_commands() {
+  printf '%s%s%s\n' "${STYLE_LABEL}" "命令速查" "${STYLE_RESET}"
+  cat <<'EOF'
+  list                           查看所有服务器
+  ssh <name>                     登录指定服务器
+  status [name|all] [--parallel] 查看状态，支持并发
+  check [name|all] [--parallel]  做基础巡检，支持并发
+  batch <target> [--parallel]    进入批量命令会话
+  containers <name>              列出机器上的容器
+  cbatch <name> [container]      进入容器批量命令会话
+  run <target> [--parallel] --   批量执行命令
+  update [name|all] [--parallel] 刷新软件包索引
+  upgrade [name|all] [--parallel]升级系统软件包
+  reboot [name|all]              重启机器
+  copy-key <name>                写入本机公钥，自动去重
+  validate                       检查配置文件
+  version                        查看版本和作者
+  menu                           打开交互菜单
+  help                           查看帮助
+EOF
+}
+
+print_menu() {
+  print_banner
+  echo
+  printf '%s%s%s\n' "${STYLE_LABEL}" "操作菜单" "${STYLE_RESET}"
+  cat <<'EOF'
+  [1] list       查看服务器列表
+  [2] status     查看全部机器状态
+  [3] check      做一轮基础巡检
+  [4] update     刷新全部机器的软件源
+  [5] upgrade    升级全部机器的软件包
+  [6] ssh        登录某一台机器
+  [7] batch      进入批量命令会话
+  [8] containers 查看某台机器的容器
+  [9] cbatch     进入容器批量命令会话
+  [u] run        批量执行命令
+  [b] reboot     重启机器
+  [v] validate   检查配置文件
+  [i] version    查看版本信息
+  [h] help       查看命令帮助
+  [0] exit       退出菜单
+EOF
+  echo
+  printf '%s\n' "${STYLE_HINT}提示: 直接敲 vps help 能看完整说明。${STYLE_RESET}"
+}
+
+ensure_config() {
+  if [[ ! -f "${CONFIG_FILE}" ]]; then
+    echo "没找到配置文件: ${CONFIG_FILE}"
+    echo "先复制 servers.example.conf 为 servers.conf，再填你的 VPS 信息。"
+    exit 1
+  fi
+}
+
+print_version() {
+  echo "${APP_NAME} ${APP_VERSION}"
+  echo "author: ${APP_AUTHOR}"
+  echo "command: ${APP_CMD}"
+}
+
+trim() {
+  local value="$1"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s' "${value}"
+}
+
+expand_home() {
+  local value="$1"
+  if [[ "${value}" == "~"* ]]; then
+    printf '%s\n' "${HOME}${value:1}"
+  else
+    printf '%s\n' "${value}"
+  fi
+}
+
+find_server() {
+  local target="$1"
+  local line
+
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    line="$(trim "${line}")"
+    [[ -z "${line}" || "${line}" == \#* ]] && continue
+    IFS='|' read -r name _ <<<"${line}"
+    name="$(trim "${name}")"
+    if [[ "${name}" == "${target}" ]]; then
+      printf '%s\n' "${line}"
+      return 0
+    fi
+  done < "${CONFIG_FILE}"
+
+  return 1
+}
+
+parse_server() {
+  local line="$1"
+
+  IFS='|' read -r SERVER_NAME SERVER_USER SERVER_HOST SERVER_PORT SERVER_KEY <<<"${line}"
+  SERVER_NAME="$(trim "${SERVER_NAME}")"
+  SERVER_USER="$(trim "${SERVER_USER}")"
+  SERVER_HOST="$(trim "${SERVER_HOST}")"
+  SERVER_PORT="$(trim "${SERVER_PORT}")"
+  SERVER_KEY="$(trim "${SERVER_KEY}")"
+
+  SERVER_PORT="${SERVER_PORT:-22}"
+  SERVER_KEY="${SERVER_KEY:--}"
+  if [[ "${SERVER_KEY}" != "-" ]]; then
+    SERVER_KEY="$(expand_home "${SERVER_KEY}")"
+  fi
+}
+
+ssh_args_for_current_server() {
+  local mode="${1:-serial}"
+
+  CURRENT_SSH_ARGS=(
+    -p "${SERVER_PORT}"
+    -o ConnectTimeout=8
+    -o ServerAliveInterval=15
+    -o ServerAliveCountMax=2
+    -o StrictHostKeyChecking=accept-new
+  )
+  if [[ "${mode}" == "parallel" ]]; then
+    CURRENT_SSH_ARGS+=(-n -o BatchMode=yes)
+  fi
+  if [[ "${SERVER_KEY}" != "-" ]]; then
+    CURRENT_SSH_ARGS+=(-i "${SERVER_KEY}")
+  fi
+}
+
+run_remote_command() {
+  local line="$1"
+  local remote_cmd="$2"
+  local mode="${3:-serial}"
+  local ssh_status
+
+  parse_server "${line}"
+  ssh_args_for_current_server "${mode}"
+
+  echo "==> ${SERVER_NAME} (${SERVER_USER}@${SERVER_HOST})"
+  set +e
+  ssh "${CURRENT_SSH_ARGS[@]}" "${SERVER_USER}@${SERVER_HOST}" "${remote_cmd}"
+  ssh_status=$?
+  set -e
+  if [[ ${ssh_status} -eq 0 ]]; then
+    echo "[OK] ${SERVER_NAME}"
+  else
+    echo "[FAIL:${ssh_status}] ${SERVER_NAME}"
+  fi
+  echo
+  return "${ssh_status}"
+}
+
+capture_remote_command() {
+  local line="$1"
+  local remote_cmd="$2"
+  local mode="${3:-serial}"
+
+  parse_server "${line}"
+  ssh_args_for_current_server "${mode}"
+
+  set +e
+  CAPTURED_REMOTE_OUTPUT="$(ssh "${CURRENT_SSH_ARGS[@]}" "${SERVER_USER}@${SERVER_HOST}" "${remote_cmd}" 2>&1)"
+  CAPTURED_REMOTE_STATUS=$?
+  set -e
+}
+
+each_server() {
+  local line
+
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    line="$(trim "${line}")"
+    [[ -z "${line}" || "${line}" == \#* ]] && continue
+    printf '%s\n' "${line}"
+  done < "${CONFIG_FILE}"
+}
+
+list_servers() {
+  local line
+
+  printf '%-12s %-12s %-24s %-6s %s\n' "名称" "用户" "主机" "端口" "密钥"
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    line="$(trim "${line}")"
+    [[ -z "${line}" || "${line}" == \#* ]] && continue
+    parse_server "${line}"
+    printf '%-12s %-12s %-24s %-6s %s\n' \
+      "${SERVER_NAME}" "${SERVER_USER}" "${SERVER_HOST}" "${SERVER_PORT}" "${SERVER_KEY}"
+  done < "${CONFIG_FILE}"
+}
+
+join_by_comma() {
+  local IFS=', '
+  printf '%s' "$*"
+}
+
+print_batch_summary() {
+  local action_label="$1"
+  local ok_total="$2"
+  local failed_total="$3"
+  local failed_list="${4:-}"
+
+  echo "汇总: ${action_label} 完成，成功 ${ok_total} 台，失败 ${failed_total} 台。"
+  if [[ "${failed_total}" -gt 0 ]]; then
+    echo "失败主机: ${failed_list}"
+  fi
+}
+
+status_remote_script() {
+  cat <<'EOF'
+echo "hostname: $(hostname)"
+echo "time: $(date '+%F %T %Z')"
+echo "uptime: $(uptime)"
+echo "disk (/):"
+df -h /
+echo "memory:"
+free -h 2>/dev/null || awk '/MemTotal|MemAvailable/ {print}' /proc/meminfo 2>/dev/null || echo "memory info unavailable"
+echo "load:"
+cat /proc/loadavg 2>/dev/null | awk '{print $1, $2, $3}' || echo "load unavailable"
+echo "services:"
+if command -v systemctl >/dev/null 2>&1; then
+  for svc in sshd ssh nginx docker cron; do
+    state="$(systemctl is-active "$svc" 2>/dev/null || true)"
+    if [ -n "$state" ]; then
+      printf '  %s: %s\n' "$svc" "$state"
+    fi
+  done
+else
+  echo "  systemctl unavailable"
+fi
+echo "public ip:"
+if command -v curl >/dev/null 2>&1; then
+  curl -fsS --max-time 4 ifconfig.me 2>/dev/null || curl -fsS --max-time 4 api.ipify.org 2>/dev/null || echo "unavailable"
+else
+  echo "curl unavailable"
+fi
+EOF
+}
+
+check_remote_script() {
+  cat <<'EOF'
+warn=0
+echo "hostname: $(hostname)"
+echo "user: $(whoami)"
+if command -v sudo >/dev/null 2>&1; then
+  if sudo -n true 2>/dev/null; then
+    echo "sudo: ok (免密可用)"
+  else
+    echo "sudo: 需要密码或不可用"
+  fi
+else
+  echo "sudo: 未安装"
+fi
+
+disk_used="$(df -P / | awk 'NR==2 {gsub("%","",$5); print $5}')"
+if [ -n "$disk_used" ]; then
+  echo "disk /: ${disk_used}%"
+  if [ "$disk_used" -ge 85 ]; then
+    echo "warning: 根分区超过 85%"
+    warn=1
+  fi
+fi
+
+mem_available="$(awk '/MemAvailable/ {printf "%.0f", $2/1024}' /proc/meminfo 2>/dev/null)"
+if [ -n "$mem_available" ]; then
+  echo "memory available: ${mem_available} MB"
+  if [ "$mem_available" -lt 200 ]; then
+    echo "warning: 可用内存低于 200 MB"
+    warn=1
+  fi
+else
+  echo "memory available: unknown"
+fi
+
+if command -v systemctl >/dev/null 2>&1; then
+  for svc in sshd ssh nginx docker cron; do
+    state="$(systemctl is-active "$svc" 2>/dev/null || true)"
+    if [ -n "$state" ]; then
+      echo "service ${svc}: ${state}"
+      if [ "$state" = "failed" ]; then
+        warn=1
+      fi
+    fi
+  done
+fi
+
+exit "$warn"
+EOF
+}
+
+parse_target_mode_args() {
+  PARSED_TARGET="all"
+  PARSED_MODE="serial"
+  local target_set=0
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --parallel|-p)
+        PARSED_MODE="parallel"
+        ;;
+      *)
+        if [[ ${target_set} -eq 1 ]]; then
+          echo "多余参数: $1"
+          return 1
+        fi
+        PARSED_TARGET="$1"
+        target_set=1
+        ;;
+    esac
+    shift
+  done
+}
+
+parse_run_args() {
+  RUN_TARGET=""
+  RUN_MODE="serial"
+  RUN_COMMAND=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --parallel|-p)
+        RUN_MODE="parallel"
+        shift
+        ;;
+      --)
+        shift
+        break
+        ;;
+      *)
+        if [[ -n "${RUN_TARGET}" ]]; then
+          echo "run 命令参数写多了: $1"
+          return 1
+        fi
+        RUN_TARGET="$1"
+        shift
+        ;;
+    esac
+  done
+
+  if [[ -z "${RUN_TARGET}" || $# -eq 0 ]]; then
+    echo "用法: vps run <name|all> [--parallel] -- <command>"
+    return 1
+  fi
+
+  RUN_COMMAND="$*"
+}
+
+parse_cbatch_args() {
+  CBATCH_TARGET=""
+  CBATCH_CONTAINER=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --parallel|-p)
+        echo "cbatch 是单机容器会话，不支持并发参数。"
+        return 1
+        ;;
+      *)
+        if [[ -z "${CBATCH_TARGET}" ]]; then
+          CBATCH_TARGET="$1"
+        elif [[ -z "${CBATCH_CONTAINER}" ]]; then
+          CBATCH_CONTAINER="$1"
+        else
+          echo "cbatch 参数写多了: $1"
+          return 1
+        fi
+        ;;
+    esac
+    shift
+  done
+
+  if [[ -z "${CBATCH_TARGET}" ]]; then
+    echo "用法: vps cbatch <name> [container]"
+    return 1
+  fi
+
+  if [[ "${CBATCH_TARGET}" == "all" ]]; then
+    echo "cbatch 只支持单台机器，别对 all 发癫。"
+    return 1
+  fi
+}
+
+parse_containers_args() {
+  CONTAINERS_TARGET=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --parallel|-p)
+        echo "containers 只查单台机器，不支持并发参数。"
+        return 1
+        ;;
+      *)
+        if [[ -n "${CONTAINERS_TARGET}" ]]; then
+          echo "containers 参数写多了: $1"
+          return 1
+        fi
+        CONTAINERS_TARGET="$1"
+        ;;
+    esac
+    shift
+  done
+
+  if [[ -z "${CONTAINERS_TARGET}" ]]; then
+    echo "用法: vps containers <name>"
+    return 1
+  fi
+
+  if [[ "${CONTAINERS_TARGET}" == "all" ]]; then
+    echo "containers 只支持单台机器。"
+    return 1
+  fi
+}
+
+list_containers_command() {
+  cat <<'EOF'
+docker ps -a --format '{{.Names}}|{{.Image}}|{{.Status}}'
+EOF
+}
+
+get_containers_for_target() {
+  local target="$1"
+  local line
+
+  if ! line="$(find_server "${target}")"; then
+    echo "没找到服务器: ${target}"
+    return 1
+  fi
+
+  capture_remote_command "${line}" "$(list_containers_command)" "serial"
+  if [[ ${CAPTURED_REMOTE_STATUS} -ne 0 ]]; then
+    echo "读取容器列表失败: ${target}"
+    [[ -n "${CAPTURED_REMOTE_OUTPUT}" ]] && echo "${CAPTURED_REMOTE_OUTPUT}"
+    return 1
+  fi
+
+  CONTAINER_LINES=()
+  local item
+  while IFS= read -r item || [[ -n "${item}" ]]; do
+    item="$(trim "${item}")"
+    [[ -z "${item}" ]] && continue
+    CONTAINER_LINES+=("${item}")
+  done <<< "${CAPTURED_REMOTE_OUTPUT}"
+}
+
+print_containers_for_target() {
+  local target="$1"
+  local skip_fetch="${2:-0}"
+  local item
+  local name image status
+
+  if [[ "${skip_fetch}" != "1" ]]; then
+    get_containers_for_target "${target}" || return 1
+  fi
+  if [[ ${#CONTAINER_LINES[@]} -eq 0 ]]; then
+    echo "${target} 上没有容器。"
+    return 0
+  fi
+
+  printf '%-4s %-24s %-28s %s\n' "序号" "容器名" "镜像" "状态"
+  local idx=1
+  for item in "${CONTAINER_LINES[@]}"; do
+    IFS='|' read -r name image status <<< "${item}"
+    printf '%-4s %-24s %-28s %s\n' "${idx}" "${name}" "${image}" "${status}"
+    idx=$((idx + 1))
+  done
+}
+
+select_container_for_target() {
+  local target="$1"
+  local choice
+  local picked_line
+  local name image status
+
+  get_containers_for_target "${target}" || return 1
+  if [[ ${#CONTAINER_LINES[@]} -eq 0 ]]; then
+    echo "${target} 上没有容器，没法进入容器会话。"
+    return 1
+  fi
+
+  echo "可选容器:"
+  print_containers_for_target "${target}" "1" || return 1
+  echo
+  read -r -p "输入容器序号或容器名: " choice
+  choice="$(trim "${choice}")"
+  [[ -z "${choice}" ]] && { echo "没输入容器。"; return 1; }
+
+  if [[ "${choice}" =~ ^[0-9]+$ ]]; then
+    if (( choice < 1 || choice > ${#CONTAINER_LINES[@]} )); then
+      echo "容器序号超出范围: ${choice}"
+      return 1
+    fi
+    picked_line="${CONTAINER_LINES[$((choice - 1))]}"
+    IFS='|' read -r name image status <<< "${picked_line}"
+    SELECTED_CONTAINER="${name}"
+    return 0
+  fi
+
+  local item
+  for item in "${CONTAINER_LINES[@]}"; do
+    IFS='|' read -r name image status <<< "${item}"
+    if [[ "${name}" == "${choice}" ]]; then
+      SELECTED_CONTAINER="${name}"
+      return 0
+    fi
+  done
+
+  echo "没找到这个容器: ${choice}"
+  return 1
+}
+
+run_serial_batch() {
+  local remote_cmd="$1"
+  shift
+  local -a server_lines=("$@")
+  local -a ok_names=()
+  local -a failed_names=()
+  local ok_total=0
+  local failed_total=0
+  local line
+  local failed_list=""
+
+  for line in "${server_lines[@]}"; do
+    parse_server "${line}"
+    if run_remote_command "${line}" "${remote_cmd}" "serial"; then
+      ok_names+=("${SERVER_NAME}")
+      ok_total=$((ok_total + 1))
+    else
+      failed_names+=("${SERVER_NAME}")
+      failed_total=$((failed_total + 1))
+    fi
+  done
+
+  if [[ ${failed_total} -gt 0 ]]; then
+    failed_list="$(join_by_comma "${failed_names[@]}")"
+  fi
+  print_batch_summary "批量任务" "${ok_total}" "${failed_total}" "${failed_list}"
+  [[ ${failed_total} -eq 0 ]]
+}
+
+run_parallel_batch() {
+  local remote_cmd="$1"
+  shift
+  local -a server_lines=("$@")
+  local temp_dir
+  local -a pids=()
+  local -a names=()
+  local -a logs=()
+  local -a ok_names=()
+  local -a failed_names=()
+  local ok_total=0
+  local failed_total=0
+  local line log_path status i
+  local failed_list=""
+
+  temp_dir="$(mktemp -d)"
+
+  for line in "${server_lines[@]}"; do
+    parse_server "${line}"
+    log_path="${temp_dir}/${SERVER_NAME}.log"
+    names+=("${SERVER_NAME}")
+    logs+=("${log_path}")
+    (
+      run_remote_command "${line}" "${remote_cmd}" "parallel"
+    ) >"${log_path}" 2>&1 &
+    pids+=("$!")
+  done
+
+  for ((i=0; i<${#pids[@]}; i++)); do
+    set +e
+    wait "${pids[$i]}"
+    status=$?
+    set -e
+    cat "${logs[$i]}"
+    if [[ ${status} -eq 0 ]]; then
+      ok_names+=("${names[$i]}")
+      ok_total=$((ok_total + 1))
+    else
+      failed_names+=("${names[$i]}")
+      failed_total=$((failed_total + 1))
+    fi
+  done
+
+  rm -rf "${temp_dir}"
+  if [[ ${failed_total} -gt 0 ]]; then
+    failed_list="$(join_by_comma "${failed_names[@]}")"
+  fi
+  print_batch_summary "并发批量任务" "${ok_total}" "${failed_total}" "${failed_list}"
+  [[ ${failed_total} -eq 0 ]]
+}
+
+run_for_target() {
+  local target="$1"
+  local remote_cmd="$2"
+  local mode="${3:-serial}"
+  local line
+
+  if [[ "${target}" == "all" ]]; then
+    local -a server_lines=()
+    while IFS= read -r line; do
+      server_lines+=("${line}")
+    done < <(each_server)
+
+    if [[ "${mode}" == "parallel" ]]; then
+      run_parallel_batch "${remote_cmd}" "${server_lines[@]}"
+    else
+      run_serial_batch "${remote_cmd}" "${server_lines[@]}"
+    fi
+    return $?
+  fi
+
+  if ! line="$(find_server "${target}")"; then
+    echo "没找到服务器: ${target}"
+    exit 1
+  fi
+  run_remote_command "${line}" "${remote_cmd}" "${mode}"
+}
+
+ssh_into_server() {
+  local target="$1"
+  local line
+
+  if ! line="$(find_server "${target}")"; then
+    echo "没找到服务器: ${target}"
+    exit 1
+  fi
+
+  parse_server "${line}"
+  ssh_args_for_current_server "serial"
+
+  exec ssh "${CURRENT_SSH_ARGS[@]}" "${SERVER_USER}@${SERVER_HOST}"
+}
+
+copy_key() {
+  local target="$1"
+  local pubkey="${HOME}/.ssh/id_ed25519.pub"
+  local line
+
+  if [[ ! -f "${pubkey}" ]]; then
+    echo "没找到公钥: ${pubkey}"
+    echo "先执行: ssh-keygen -t ed25519"
+    exit 1
+  fi
+
+  if ! line="$(find_server "${target}")"; then
+    echo "没找到服务器: ${target}"
+    exit 1
+  fi
+
+  parse_server "${line}"
+  ssh_args_for_current_server "serial"
+  ssh "${CURRENT_SSH_ARGS[@]}" "${SERVER_USER}@${SERVER_HOST}" \
+    "umask 077 && mkdir -p ~/.ssh && touch ~/.ssh/authorized_keys && cat > ~/.ssh/vps_tmp_key && (grep -qxFf ~/.ssh/vps_tmp_key ~/.ssh/authorized_keys || cat ~/.ssh/vps_tmp_key >> ~/.ssh/authorized_keys) && rm -f ~/.ssh/vps_tmp_key" \
+    < "${pubkey}"
+  echo "公钥已写入 ${SERVER_NAME}"
+}
+
+validate_config() {
+  local line
+  local lineno=0
+  local errors=0
+  local seen_total=0
+  local field_count
+  local -a seen_names=()
+  local seen name_item
+
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    lineno=$((lineno + 1))
+    line="$(trim "${line}")"
+    [[ -z "${line}" || "${line}" == \#* ]] && continue
+
+    field_count="$(awk -F'|' '{print NF}' <<<"${line}")"
+    if [[ "${field_count}" -ne 5 ]]; then
+      echo "第 ${lineno} 行字段数量不对，应该是 5 段。"
+      errors=$((errors + 1))
+      continue
+    fi
+
+    parse_server "${line}"
+
+    if [[ -z "${SERVER_NAME}" || -z "${SERVER_USER}" || -z "${SERVER_HOST}" ]]; then
+      echo "第 ${lineno} 行有空字段，名称、用户、主机都必须填。"
+      errors=$((errors + 1))
+    fi
+
+    if ! [[ "${SERVER_PORT}" =~ ^[0-9]+$ ]] || (( SERVER_PORT < 1 || SERVER_PORT > 65535 )); then
+      echo "第 ${lineno} 行端口不合法: ${SERVER_PORT}"
+      errors=$((errors + 1))
+    fi
+
+    if [[ "${SERVER_KEY}" != "-" && ! -f "${SERVER_KEY}" ]]; then
+      echo "第 ${lineno} 行私钥文件不存在: ${SERVER_KEY}"
+      errors=$((errors + 1))
+    fi
+
+    seen=0
+    if [[ ${seen_total} -gt 0 ]]; then
+      for name_item in "${seen_names[@]}"; do
+        if [[ "${name_item}" == "${SERVER_NAME}" ]]; then
+          seen=1
+          break
+        fi
+      done
+    fi
+    if [[ ${seen} -eq 1 ]]; then
+      echo "第 ${lineno} 行服务器名称重复: ${SERVER_NAME}"
+      errors=$((errors + 1))
+    else
+      seen_names+=("${SERVER_NAME}")
+      seen_total=$((seen_total + 1))
+    fi
+  done < "${CONFIG_FILE}"
+
+  if [[ ${seen_total} -eq 0 ]]; then
+    echo "配置文件里没有有效服务器。"
+    return 1
+  fi
+
+  if [[ ${errors} -eq 0 ]]; then
+    echo "配置校验通过，共 ${seen_total} 台服务器。"
+    return 0
+  fi
+
+  echo "配置校验失败，共发现 ${errors} 个问题。"
+  return 1
+}
+
+confirm_reboot() {
+  local target="$1"
+  read -r -p "确认重启 ${target}？输入 YES 继续: " confirm
+  if [[ "${confirm}" != "YES" ]]; then
+    echo "已取消。"
+    exit 0
+  fi
+}
+
+interactive_help() {
+  print_banner
+  echo
+  print_quick_commands
+  echo
+  echo "直接输入 ${APP_CMD} 会打开菜单，少记不少命令。"
+}
+
+print_batch_console_help() {
+  local session_kind="${1:-host}"
+  cat <<EOF
+批量命令会话说明:
+  直接输入要执行的远程命令即可
+  输入 :q 或 exit 退出会话
+  输入 :help 查看这段说明
+  输入 :history 查看本次会话历史
+  输入 :shortcuts 查看快捷词
+  输入 !! 重跑上一条命令
+  输入 !数字 重跑历史里的某一条命令
+
+例子:
+$(if [[ "${session_kind}" == "container" ]]; then cat <<'INNER'
+  pwd
+  ls -lah
+  ps
+  env | sort
+INNER
+else cat <<'INNER'
+  docker ps
+  systemctl status nginx --no-pager
+  journalctl -u docker -n 50 --no-pager
+  cd /opt/app && git pull && docker compose up -d
+INNER
+fi)
+EOF
+}
+
+print_batch_shortcuts() {
+  local session_kind="${1:-host}"
+  if [[ "${session_kind}" == "container" ]]; then
+    cat <<'EOF'
+容器会话快捷词:
+  ps              => ps
+  ls              => ls -lah
+  env             => env | sort
+  pwd             => pwd
+  ports           => ss -tulpn || netstat -tulpn
+  restart         => supervisorctl restart all || s6-svc -r /var/run/s6/services/* || true
+EOF
+    return 0
+  fi
+
+  cat <<'EOF'
+常用快捷词:
+  ps              => docker ps
+  nginx           => systemctl status nginx --no-pager
+  docker          => systemctl status docker --no-pager
+  disk            => df -h
+  mem             => free -h
+  ports           => ss -tulpn
+  restart-nginx   => sudo systemctl restart nginx
+  restart-docker  => sudo systemctl restart docker
+EOF
+}
+
+batch_shortcut_command() {
+  local session_kind="${1:-host}"
+  local token="${2:-}"
+
+  if [[ "${session_kind}" == "container" ]]; then
+    case "${token}" in
+      ps)
+        printf '%s\n' "ps"
+        ;;
+      ls)
+        printf '%s\n' "ls -lah"
+        ;;
+      env)
+        printf '%s\n' "env | sort"
+        ;;
+      pwd)
+        printf '%s\n' "pwd"
+        ;;
+      ports)
+        printf '%s\n' "ss -tulpn || netstat -tulpn"
+        ;;
+      restart)
+        printf '%s\n' "supervisorctl restart all || s6-svc -r /var/run/s6/services/* || true"
+        ;;
+      *)
+        return 1
+        ;;
+    esac
+    return 0
+  fi
+
+  case "${token}" in
+    ps)
+      printf '%s\n' "docker ps"
+      ;;
+    nginx)
+      printf '%s\n' "systemctl status nginx --no-pager"
+      ;;
+    docker)
+      printf '%s\n' "systemctl status docker --no-pager"
+      ;;
+    disk)
+      printf '%s\n' "df -h"
+      ;;
+    mem)
+      printf '%s\n' "free -h"
+      ;;
+    ports)
+      printf '%s\n' "ss -tulpn"
+      ;;
+    restart-nginx)
+      printf '%s\n' "sudo systemctl restart nginx"
+      ;;
+    restart-docker)
+      printf '%s\n' "sudo systemctl restart docker"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+quote_for_single_shell() {
+  local value="$1"
+  value="${value//\'/\'\\\'\'}"
+  printf "'%s'" "${value}"
+}
+
+wrap_container_exec_command() {
+  local container="$1"
+  local inner_cmd="$2"
+  local quoted_container
+  local quoted_inner
+
+  quoted_container="$(quote_for_single_shell "${container}")"
+  quoted_inner="$(quote_for_single_shell "${inner_cmd}")"
+  printf 'docker exec %s sh -lc %s' "${quoted_container}" "${quoted_inner}"
+}
+
+append_batch_history() {
+  local cmd="$1"
+  BATCH_HISTORY_ITEMS+=("${cmd}")
+  BATCH_HISTORY_COUNT=$((BATCH_HISTORY_COUNT + 1))
+  printf '%s\n' "${cmd}" >> "${HISTORY_FILE}"
+}
+
+show_batch_history() {
+  local i
+
+  if [[ ${BATCH_HISTORY_COUNT} -eq 0 ]]; then
+    echo "当前会话还没有历史命令。"
+    return 0
+  fi
+
+  echo "本次会话历史:"
+  for ((i=0; i<${BATCH_HISTORY_COUNT}; i++)); do
+    printf '  [%d] %s\n' "$((i + 1))" "${BATCH_HISTORY_ITEMS[$i]}"
+  done
+}
+
+resolve_history_reference() {
+  local token="$1"
+  local idx
+
+  if [[ ${BATCH_HISTORY_COUNT} -eq 0 ]]; then
+    echo "当前会话还没有可重跑的命令。" >&2
+    return 1
+  fi
+
+  if [[ "${token}" == "!!" ]]; then
+    printf '%s\n' "${BATCH_HISTORY_ITEMS[$((BATCH_HISTORY_COUNT - 1))]}"
+    return 0
+  fi
+
+  if [[ "${token}" =~ ^![0-9]+$ ]]; then
+    idx="${token#!}"
+    if (( idx < 1 || idx > BATCH_HISTORY_COUNT )); then
+      echo "历史编号超出范围: ${idx}" >&2
+      return 1
+    fi
+    printf '%s\n' "${BATCH_HISTORY_ITEMS[$((idx - 1))]}"
+    return 0
+  fi
+
+  return 1
+}
+
+batch_console() {
+  local target="$1"
+  local mode="${2:-serial}"
+  local session_kind="${3:-host}"
+  local container_name="${4:-}"
+  local prompt mode_label remote_cmd
+  local translated_cmd=""
+  local session_label=""
+  local wrapped_cmd=""
+
+  BATCH_HISTORY_COUNT=0
+  BATCH_HISTORY_ITEMS=()
+  : > "${HISTORY_FILE}"
+
+  mode_label="${mode}"
+  session_label="${target}"
+  if [[ "${session_kind}" == "container" ]]; then
+    session_label="${target}/${container_name}"
+    echo "进入容器批量命令会话，目标: ${target}，容器: ${container_name}"
+  else
+    echo "进入批量命令会话，目标: ${target}，模式: ${mode_label}"
+  fi
+  print_batch_console_help "${session_kind}"
+  echo
+  print_batch_shortcuts "${session_kind}"
+  echo
+
+  while true; do
+    if [[ "${session_kind}" == "container" ]]; then
+      prompt="cbatch(${session_label})> "
+    else
+      prompt="batch(${session_label}/${mode_label})> "
+    fi
+    if [[ -t 0 && -t 1 ]]; then
+      if ! read -e -r -p "${prompt}" remote_cmd; then
+        echo
+        break
+      fi
+    elif ! read -r -p "${prompt}" remote_cmd; then
+      echo
+      break
+    fi
+
+    remote_cmd="$(trim "${remote_cmd}")"
+    [[ -z "${remote_cmd}" ]] && continue
+
+    case "${remote_cmd}" in
+      :q|:quit|exit|quit)
+        break
+        ;;
+      :help|help)
+        print_batch_console_help "${session_kind}"
+        echo
+        print_batch_shortcuts "${session_kind}"
+        echo
+        continue
+        ;;
+      :history)
+        show_batch_history
+        echo
+        continue
+        ;;
+      :shortcuts)
+        print_batch_shortcuts "${session_kind}"
+        echo
+        continue
+        ;;
+    esac
+
+    translated_cmd=""
+    case "${remote_cmd}" in
+      '!!'|![0-9]*)
+        if translated_cmd="$(resolve_history_reference "${remote_cmd}")"; then
+          remote_cmd="${translated_cmd}"
+          echo "重跑: ${remote_cmd}"
+        else
+          echo
+          continue
+        fi
+        ;;
+      *)
+        if translated_cmd="$(batch_shortcut_command "${session_kind}" "${remote_cmd}")"; then
+          remote_cmd="${translated_cmd}"
+          echo "快捷词展开: ${remote_cmd}"
+        fi
+        ;;
+    esac
+
+    append_batch_history "${remote_cmd}"
+    wrapped_cmd="${remote_cmd}"
+    if [[ "${session_kind}" == "container" ]]; then
+      wrapped_cmd="$(wrap_container_exec_command "${container_name}" "${remote_cmd}")"
+    fi
+    run_for_target "${target}" "${wrapped_cmd}" "${mode}"
+  done
+}
+
+menu() {
+  local choice target remote_cmd
+
+  while true; do
+    print_menu
+    read -r -p "请输入编号: " choice
+    echo
+    case "${choice}" in
+      1)
+        list_servers
+        ;;
+      2)
+        run_for_target "all" "$(status_remote_script)" "serial"
+        ;;
+      3)
+        run_for_target "all" "$(check_remote_script)" "serial"
+        ;;
+      4)
+        run_for_target "all" "sudo apt update"
+        ;;
+      5)
+        run_for_target "all" "sudo apt update && sudo apt -y upgrade"
+        ;;
+      6)
+        read -r -p "输入服务器名: " target
+        ssh_into_server "${target}"
+        ;;
+      7)
+        read -r -p "输入目标（服务器名或 all，默认 all）: " target
+        target="${target:-all}"
+        batch_console "${target}" "serial" "host"
+        ;;
+      8)
+        read -r -p "输入服务器名: " target
+        print_containers_for_target "${target}"
+        ;;
+      9)
+        read -r -p "输入服务器名: " target
+        read -r -p "输入容器名: " remote_cmd
+        if [[ -z "$(trim "${remote_cmd}")" ]]; then
+          select_container_for_target "${target}" || continue
+          remote_cmd="${SELECTED_CONTAINER}"
+        fi
+        batch_console "${target}" "serial" "container" "${remote_cmd}"
+        ;;
+      u|U)
+        read -r -p "输入目标（服务器名或 all）: " target
+        read -r -p "输入要执行的命令: " remote_cmd
+        run_for_target "${target}" "${remote_cmd}"
+        ;;
+      b|B)
+        read -r -p "输入目标（服务器名或 all）: " target
+        confirm_reboot "${target}"
+        run_for_target "${target}" "sudo reboot"
+        ;;
+      v|V)
+        validate_config
+        ;;
+      i|I)
+        print_version
+        ;;
+      h|H)
+        interactive_help
+        ;;
+      0|q|quit|exit)
+        break
+        ;;
+      *)
+        echo "请输入有效编号，别乱敲。"
+        ;;
+    esac
+    echo
+    read -r -n 1 -s -p "按任意键返回菜单..." _unused
+    echo
+    echo
+  done
+}
+
+normalize_cmd() {
+  case "${1:-}" in
+    "" )
+      printf '%s\n' "menu"
+      ;;
+    list|ls )
+      printf '%s\n' "list"
+      ;;
+    ssh|login )
+      printf '%s\n' "ssh"
+      ;;
+    run|exec )
+      printf '%s\n' "run"
+      ;;
+    status )
+      printf '%s\n' "status"
+      ;;
+    check )
+      printf '%s\n' "check"
+      ;;
+    batch|console )
+      printf '%s\n' "batch"
+      ;;
+    containers|container-list )
+      printf '%s\n' "containers"
+      ;;
+    cbatch|container-batch )
+      printf '%s\n' "cbatch"
+      ;;
+    update )
+      printf '%s\n' "update"
+      ;;
+    upgrade )
+      printf '%s\n' "upgrade"
+      ;;
+    reboot )
+      printf '%s\n' "reboot"
+      ;;
+    copy-key|copykey )
+      printf '%s\n' "copy-key"
+      ;;
+    validate )
+      printf '%s\n' "validate"
+      ;;
+    version|--version|-V )
+      printf '%s\n' "version"
+      ;;
+    menu )
+      printf '%s\n' "menu"
+      ;;
+    help|-h|--help )
+      printf '%s\n' "help"
+      ;;
+    * )
+      printf '%s\n' "$1"
+      ;;
+  esac
+}
+
+main() {
+  ensure_config
+
+  local original_cmd="${1:-}"
+  local cmd
+  cmd="$(normalize_cmd "${original_cmd}")"
+
+  case "${cmd}" in
+    list)
+      list_servers
+      ;;
+    ssh)
+      [[ $# -ge 2 ]] || { echo "用法: vps ssh <name>"; exit 1; }
+      ssh_into_server "$2"
+      ;;
+    run)
+      parse_run_args "${@:2}" || exit 1
+      if [[ "${RUN_MODE}" == "parallel" && "${RUN_TARGET}" != "all" ]]; then
+        echo "并发模式主要给 all 用，单台机器没必要开并发。"
+      fi
+      run_for_target "${RUN_TARGET}" "${RUN_COMMAND}" "${RUN_MODE}"
+      ;;
+    status)
+      parse_target_mode_args "${@:2}" || exit 1
+      run_for_target "${PARSED_TARGET}" "$(status_remote_script)" "${PARSED_MODE}"
+      ;;
+    check)
+      parse_target_mode_args "${@:2}" || exit 1
+      run_for_target "${PARSED_TARGET}" "$(check_remote_script)" "${PARSED_MODE}"
+      ;;
+    batch)
+      parse_target_mode_args "${@:2}" || exit 1
+      batch_console "${PARSED_TARGET}" "${PARSED_MODE}" "host"
+      ;;
+    containers)
+      parse_containers_args "${@:2}" || exit 1
+      print_containers_for_target "${CONTAINERS_TARGET}"
+      ;;
+    cbatch)
+      parse_cbatch_args "${@:2}" || exit 1
+      if [[ -z "${CBATCH_CONTAINER}" ]]; then
+        if [[ -t 0 && -t 1 ]]; then
+          select_container_for_target "${CBATCH_TARGET}" || exit 1
+          CBATCH_CONTAINER="${SELECTED_CONTAINER}"
+        else
+          echo "用法: vps cbatch <name> [container]"
+          echo "非交互场景下请明确传容器名，或者先执行: vps containers <name>"
+          exit 1
+        fi
+      fi
+      batch_console "${CBATCH_TARGET}" "serial" "container" "${CBATCH_CONTAINER}"
+      ;;
+    update)
+      parse_target_mode_args "${@:2}" || exit 1
+      run_for_target "${PARSED_TARGET}" "sudo apt update" "${PARSED_MODE}"
+      ;;
+    upgrade)
+      parse_target_mode_args "${@:2}" || exit 1
+      run_for_target "${PARSED_TARGET}" "sudo apt update && sudo apt -y upgrade" "${PARSED_MODE}"
+      ;;
+    reboot)
+      confirm_reboot "${2:-all}"
+      run_for_target "${2:-all}" "sudo reboot" "serial"
+      ;;
+    copy-key)
+      [[ $# -ge 2 ]] || { echo "用法: vps copy-key <name>"; exit 1; }
+      copy_key "$2"
+      ;;
+    validate)
+      validate_config
+      ;;
+    version)
+      print_version
+      ;;
+    menu)
+      menu
+      ;;
+    help)
+      interactive_help
+      ;;
+    *)
+      echo "不认识这个命令: ${original_cmd}"
+      echo
+      interactive_help
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"
