@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.0] - 2026-04-21
 
 ### Added
 
@@ -14,6 +14,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Added `backup <name> <path>` for pre-edit remote backups
 - Added `doctor <name> [service|container]` for diagnostics and optional AI analysis
 - Added development design document at `docs/development-plan.md`
+
+### Changed
+
+- Refined CLI layout, menu ordering, and help output for a cleaner day-to-day workflow
+- Upgraded `status` so single-host view shows a richer diagnostic panel
+- Simplified the main menu to keep only the most frequently used commands
 
 ## [0.0.2] - 2026-04-21
 

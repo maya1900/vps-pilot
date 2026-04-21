@@ -16,7 +16,7 @@ SCRIPT_DIR="$(resolve_script_dir)"
 CONFIG_FILE="${VPSCTL_CONFIG:-${SCRIPT_DIR}/servers.conf}"
 HISTORY_FILE="${VPSCTL_HISTORY_FILE:-${SCRIPT_DIR}/.vps_batch_history}"
 APP_NAME="VPS Pilot"
-APP_VERSION="v0.0.3-dev"
+APP_VERSION="v0.1.0"
 APP_AUTHOR="markyal"
 APP_CMD="vps"
 APP_DESC="一个用于本机统一管理多台 VPS 的轻量运维工具。"
@@ -165,20 +165,14 @@ print_banner() {
 }
 
 print_quick_commands() {
-  print_section_title "命令速查"
+  print_section_title "常用命令"
   cat <<'EOF'
   list                           查看所有服务器
   ssh <name>                     登录指定服务器
   code <name> [path]             用 VS Code 打开远程目录
-  backup <name> <path>           备份远程文件或目录
-  ssh-config sync                同步 ~/.ssh/config
   status [name|all] [--parallel] 查看状态，支持并发
   check [name|all] [--parallel]  做基础巡检，支持并发
-  doctor <name> [subject]        采集日志并做诊断
   batch <target> [--parallel]    进入批量命令会话
-  containers <name>              列出机器上的容器
-  docker <name>                  containers 的别名
-  cbatch <name> [container]      进入容器批量命令会话
   run <target> [--parallel] --   批量执行命令
   update [name|all] [--parallel] 刷新软件包索引
   upgrade [name|all] [--parallel]升级系统软件包
@@ -188,6 +182,16 @@ print_quick_commands() {
   version                        查看版本和作者
   menu                           打开交互菜单
   help                           查看帮助
+EOF
+  echo
+  print_section_title "进阶命令"
+  cat <<'EOF'
+  doctor <name> [subject]        采集日志并做诊断
+  containers <name>              列出机器上的容器
+  docker <name>                  containers 的别名
+  cbatch <name> [container]      进入容器批量命令会话
+  backup <name> <path>           备份远程文件或目录
+  ssh-config sync                同步 ~/.ssh/config
 EOF
 }
 
@@ -203,12 +207,7 @@ print_menu() {
   [5] upgrade    升级全部机器的软件包
   [6] ssh        登录某一台机器
   [7] batch      进入批量命令会话
-  [8] containers 查看某台机器的容器
-  [9] cbatch     进入容器批量命令会话
-  [d] doctor     诊断某台机器上的报错
   [c] code       用 VS Code 打开远程目录
-  [k] backup     先备份远程文件或目录
-  [s] ssh-config 同步本机 SSH 配置
   [u] run        批量执行命令
   [b] reboot     重启机器
   [v] validate   检查配置文件
@@ -2089,11 +2088,6 @@ menu() {
       3)
         run_for_target "all" "$(check_remote_script)" "serial"
         ;;
-      d|D)
-        read -r -p "输入服务器名: " target
-        read -r -p "输入服务名或容器名（可留空）: " remote_cmd
-        doctor_target "${target}" "${remote_cmd}"
-        ;;
       4)
         run_for_target "all" "sudo apt update"
         ;;
@@ -2109,31 +2103,10 @@ menu() {
         read -r -p "输入远程目录（默认当前登录用户家目录，如 root=/root）: " remote_cmd
         open_remote_in_code "${target}" "${remote_cmd}"
         ;;
-      k|K)
-        read -r -p "输入服务器名: " target
-        read -r -p "输入要备份的远程路径: " remote_cmd
-        backup_remote_path "${target}" "${remote_cmd}"
-        ;;
       7)
         read -r -p "输入目标（服务器名或 all，默认 all）: " target
         target="${target:-all}"
         batch_console "${target}" "serial" "host"
-        ;;
-      8)
-        read -r -p "输入服务器名: " target
-        print_containers_for_target "${target}"
-        ;;
-      9)
-        read -r -p "输入服务器名: " target
-        read -r -p "输入容器名: " remote_cmd
-        if [[ -z "$(trim "${remote_cmd}")" ]]; then
-          select_container_for_target "${target}" || continue
-          remote_cmd="${SELECTED_CONTAINER}"
-        fi
-        batch_console "${target}" "serial" "container" "${remote_cmd}"
-        ;;
-      s|S)
-        sync_ssh_config "${SSH_CONFIG_FILE}"
         ;;
       u|U)
         read -r -p "输入目标（服务器名或 all）: " target
