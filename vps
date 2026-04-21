@@ -16,10 +16,17 @@ SCRIPT_DIR="$(resolve_script_dir)"
 CONFIG_FILE="${VPSCTL_CONFIG:-${SCRIPT_DIR}/servers.conf}"
 HISTORY_FILE="${VPSCTL_HISTORY_FILE:-${SCRIPT_DIR}/.vps_batch_history}"
 APP_NAME="VPS Pilot"
-APP_VERSION="v0.0.2"
+APP_VERSION="v0.0.3-dev"
 APP_AUTHOR="markyal"
 APP_CMD="vps"
-APP_QUICK_HINT="list | ssh <name> | status | batch all | containers <name>"
+APP_DESC="一个用于本机统一管理多台 VPS 的轻量运维工具。"
+SSH_CONFIG_FILE="${VPSCTL_SSH_CONFIG_FILE:-${HOME}/.ssh/config}"
+SSH_CONFIG_BEGIN="# >>> VPS Pilot managed hosts >>>"
+SSH_CONFIG_END="# <<< VPS Pilot managed hosts <<<"
+CODE_BIN="${VPSCTL_CODE_BIN:-code}"
+AI_API_URL="${VPSCTL_AI_API_URL:-https://api.openai.com/v1/chat/completions}"
+AI_API_KEY="${VPSCTL_AI_API_KEY:-}"
+AI_MODEL="${VPSCTL_AI_MODEL:-}"
 
 if ! command -v ssh >/dev/null 2>&1; then
   echo "缺少 ssh 命令，先安装 OpenSSH 客户端。"
@@ -28,14 +35,26 @@ fi
 
 if [[ -t 1 ]]; then
   STYLE_RESET=$'\033[0m'
-  STYLE_TITLE=$'\033[1;36m'
-  STYLE_LABEL=$'\033[1;33m'
+  STYLE_TITLE=$'\033[1;38;5;45m'
+  STYLE_LABEL=$'\033[1;38;5;221m'
+  STYLE_ACCENT=$'\033[1;38;5;81m'
+  STYLE_VALUE=$'\033[1;38;5;255m'
+  STYLE_MUTED=$'\033[38;5;246m'
   STYLE_HINT=$'\033[2m'
+  STYLE_OK=$'\033[1;38;5;78m'
+  STYLE_WARN=$'\033[1;38;5;214m'
+  STYLE_FAIL=$'\033[1;38;5;203m'
 else
   STYLE_RESET=""
   STYLE_TITLE=""
   STYLE_LABEL=""
+  STYLE_ACCENT=""
+  STYLE_VALUE=""
+  STYLE_MUTED=""
   STYLE_HINT=""
+  STYLE_OK=""
+  STYLE_WARN=""
+  STYLE_FAIL=""
 fi
 
 BATCH_HISTORY_COUNT=0
@@ -44,6 +63,34 @@ CAPTURED_REMOTE_OUTPUT=""
 CAPTURED_REMOTE_STATUS=0
 CONTAINER_LINES=()
 SELECTED_CONTAINER=""
+
+style_text() {
+  local style="$1"
+  shift
+  printf '%s%s%s' "${style}" "$*" "${STYLE_RESET}"
+}
+
+print_rule() {
+  printf '%s\n' "$(style_text "${STYLE_MUTED}" "------------------------------------------------------------")"
+}
+
+print_section_title() {
+  local title="$1"
+  printf '%s %s\n' "$(style_text "${STYLE_LABEL}" "[*]")" "$(style_text "${STYLE_VALUE}" "${title}")"
+}
+
+format_status_label() {
+  local text="$1"
+  local state="${2:-info}"
+  local style="${STYLE_ACCENT}"
+  case "${state}" in
+    ok) style="${STYLE_OK}" ;;
+    warn) style="${STYLE_WARN}" ;;
+    fail) style="${STYLE_FAIL}" ;;
+    info) style="${STYLE_ACCENT}" ;;
+  esac
+  printf '%s' "$(style_text "${style}" "${text}")"
+}
 
 usage() {
   cat <<EOF
@@ -56,8 +103,12 @@ by ${APP_AUTHOR}
 常用命令:
   ${APP_CMD} list
   ${APP_CMD} ssh <name>
+  ${APP_CMD} code <name> [path]
+  ${APP_CMD} backup <name> <path>
+  ${APP_CMD} ssh-config sync
   ${APP_CMD} status [name|all] [--parallel]
   ${APP_CMD} check [name|all] [--parallel]
+  ${APP_CMD} doctor <name> [service|container]
   ${APP_CMD} batch <name|all> [--parallel]
   ${APP_CMD} containers <name>
   ${APP_CMD} cbatch <name> [container]
@@ -74,10 +125,15 @@ by ${APP_AUTHOR}
 命令说明:
   list              查看服务器列表
   ssh <name>        登录指定服务器
+  code <name>       用 VS Code 打开远程目录
+  backup <name>     先给远程文件或目录做一份备份
+  ssh-config sync   同步 ~/.ssh/config，方便 Remote-SSH 使用
   status [target]   查看在线状态和磁盘空间
   check [target]    做一轮基础巡检，发现明显异常
+  doctor <name>     采集报错上下文并做本地诊断，可接 AI 分析
   batch [target]    进入批量命令会话，连续执行多条命令
   containers        列出某台机器上的容器
+  docker <name>     containers 的别名，顺手党直接用
   cbatch            进入容器批量命令会话，命令自动在容器内执行
   run <target> --   对一台或全部机器执行命令
   update [target]   只刷新软件包索引
@@ -92,27 +148,36 @@ by ${APP_AUTHOR}
 配置文件:
   默认读取当前目录下的 servers.conf
   也可以通过环境变量 VPSCTL_CONFIG 指定其它路径
+
+AI 诊断可选环境变量:
+  VPSCTL_AI_API_KEY   OpenAI 兼容接口的 API Key
+  VPSCTL_AI_MODEL     要使用的模型名
+  VPSCTL_AI_API_URL   接口地址，默认 ${AI_API_URL}
 EOF
 }
 
 print_banner() {
-  printf '%s\n' "${STYLE_TITLE}+--------------------------------------------------+${STYLE_RESET}"
-  printf '%s\n' "${STYLE_TITLE}| ${APP_NAME}${STYLE_RESET}"
-  printf '%s\n' "${STYLE_LABEL}| ${APP_VERSION} | by ${APP_AUTHOR}${STYLE_RESET}"
-  printf '%s\n' "${STYLE_HINT}| cmd: ${APP_CMD}${STYLE_RESET}"
-  printf '%s\n' "${STYLE_HINT}| quick: ${APP_QUICK_HINT}${STYLE_RESET}"
-  printf '%s\n' "${STYLE_TITLE}+--------------------------------------------------+${STYLE_RESET}"
+  printf '%s\n' "$(style_text "${STYLE_TITLE}" "============================================================")"
+  printf '%s %s %s\n' "$(style_text "${STYLE_TITLE}" "VPS Pilot")" "$(style_text "${STYLE_LABEL}" "${APP_VERSION}")" "$(style_text "${STYLE_MUTED}" "by ${APP_AUTHOR}")"
+  printf '%s %s\n' "$(style_text "${STYLE_ACCENT}" "cmd")" "$(style_text "${STYLE_VALUE}" "${APP_CMD}")"
+  printf '%s\n' "$(style_text "${STYLE_MUTED}" "${APP_DESC}")"
+  printf '%s\n' "$(style_text "${STYLE_TITLE}" "============================================================")"
 }
 
 print_quick_commands() {
-  printf '%s%s%s\n' "${STYLE_LABEL}" "命令速查" "${STYLE_RESET}"
+  print_section_title "命令速查"
   cat <<'EOF'
   list                           查看所有服务器
   ssh <name>                     登录指定服务器
+  code <name> [path]             用 VS Code 打开远程目录
+  backup <name> <path>           备份远程文件或目录
+  ssh-config sync                同步 ~/.ssh/config
   status [name|all] [--parallel] 查看状态，支持并发
   check [name|all] [--parallel]  做基础巡检，支持并发
+  doctor <name> [subject]        采集日志并做诊断
   batch <target> [--parallel]    进入批量命令会话
   containers <name>              列出机器上的容器
+  docker <name>                  containers 的别名
   cbatch <name> [container]      进入容器批量命令会话
   run <target> [--parallel] --   批量执行命令
   update [name|all] [--parallel] 刷新软件包索引
@@ -129,7 +194,7 @@ EOF
 print_menu() {
   print_banner
   echo
-  printf '%s%s%s\n' "${STYLE_LABEL}" "操作菜单" "${STYLE_RESET}"
+  print_section_title "操作菜单"
   cat <<'EOF'
   [1] list       查看服务器列表
   [2] status     查看全部机器状态
@@ -140,6 +205,10 @@ print_menu() {
   [7] batch      进入批量命令会话
   [8] containers 查看某台机器的容器
   [9] cbatch     进入容器批量命令会话
+  [d] doctor     诊断某台机器上的报错
+  [c] code       用 VS Code 打开远程目录
+  [k] backup     先备份远程文件或目录
+  [s] ssh-config 同步本机 SSH 配置
   [u] run        批量执行命令
   [b] reboot     重启机器
   [v] validate   检查配置文件
@@ -148,7 +217,7 @@ print_menu() {
   [0] exit       退出菜单
 EOF
   echo
-  printf '%s\n' "${STYLE_HINT}提示: 直接敲 vps help 能看完整说明。${STYLE_RESET}"
+  printf '%s\n' "$(style_text "${STYLE_HINT}" "提示: 直接敲 vps help 能看完整说明。")"
 }
 
 ensure_config() {
@@ -160,9 +229,10 @@ ensure_config() {
 }
 
 print_version() {
-  echo "${APP_NAME} ${APP_VERSION}"
-  echo "author: ${APP_AUTHOR}"
-  echo "command: ${APP_CMD}"
+  print_banner
+  echo
+  printf '%s %s\n' "$(style_text "${STYLE_ACCENT}" "author")" "$(style_text "${STYLE_VALUE}" "${APP_AUTHOR}")"
+  printf '%s %s\n' "$(style_text "${STYLE_ACCENT}" "command")" "$(style_text "${STYLE_VALUE}" "${APP_CMD}")"
 }
 
 trim() {
@@ -243,15 +313,16 @@ run_remote_command() {
   parse_server "${line}"
   ssh_args_for_current_server "${mode}"
 
-  echo "==> ${SERVER_NAME} (${SERVER_USER}@${SERVER_HOST})"
+  print_rule
+  printf '%s %s %s\n' "$(style_text "${STYLE_LABEL}" ">>>")" "$(style_text "${STYLE_VALUE}" "${SERVER_NAME}")" "$(style_text "${STYLE_MUTED}" "(${SERVER_USER}@${SERVER_HOST})")"
   set +e
   ssh "${CURRENT_SSH_ARGS[@]}" "${SERVER_USER}@${SERVER_HOST}" "${remote_cmd}"
   ssh_status=$?
   set -e
   if [[ ${ssh_status} -eq 0 ]]; then
-    echo "[OK] ${SERVER_NAME}"
+    printf '%s %s\n' "$(format_status_label "[OK]" "ok")" "$(style_text "${STYLE_VALUE}" "${SERVER_NAME}")"
   else
-    echo "[FAIL:${ssh_status}] ${SERVER_NAME}"
+    printf '%s %s %s\n' "$(format_status_label "[FAIL:${ssh_status}]" "fail")" "$(style_text "${STYLE_VALUE}" "${SERVER_NAME}")" "$(style_text "${STYLE_MUTED}" "请看上面的输出")"
   fi
   echo
   return "${ssh_status}"
@@ -284,7 +355,16 @@ each_server() {
 list_servers() {
   local line
 
-  printf '%-12s %-12s %-24s %-6s %s\n' "名称" "用户" "主机" "端口" "密钥"
+  print_banner
+  echo
+  print_section_title "服务器列表"
+  printf '%-12s %-12s %-24s %-6s %s\n' \
+    "$(style_text "${STYLE_ACCENT}" "名称")" \
+    "$(style_text "${STYLE_ACCENT}" "用户")" \
+    "$(style_text "${STYLE_ACCENT}" "主机")" \
+    "$(style_text "${STYLE_ACCENT}" "端口")" \
+    "$(style_text "${STYLE_ACCENT}" "密钥")"
+  print_rule
   while IFS= read -r line || [[ -n "${line}" ]]; do
     line="$(trim "${line}")"
     [[ -z "${line}" || "${line}" == \#* ]] && continue
@@ -305,9 +385,15 @@ print_batch_summary() {
   local failed_total="$3"
   local failed_list="${4:-}"
 
-  echo "汇总: ${action_label} 完成，成功 ${ok_total} 台，失败 ${failed_total} 台。"
+  print_rule
+  printf '%s %s %s %s %s\n' \
+    "$(style_text "${STYLE_LABEL}" "汇总")" \
+    "$(style_text "${STYLE_VALUE}" "${action_label}")" \
+    "$(style_text "${STYLE_MUTED}" "完成，成功")" \
+    "$(style_text "${STYLE_OK}" "${ok_total}")" \
+    "$(style_text "${STYLE_MUTED}" "台，失败 ${failed_total} 台。")"
   if [[ "${failed_total}" -gt 0 ]]; then
-    echo "失败主机: ${failed_list}"
+    printf '%s %s\n' "$(style_text "${STYLE_FAIL}" "失败主机:")" "$(style_text "${STYLE_VALUE}" "${failed_list}")"
   fi
 }
 
@@ -339,6 +425,199 @@ if command -v curl >/dev/null 2>&1; then
 else
   echo "curl unavailable"
 fi
+EOF
+}
+
+status_detail_remote_script() {
+  cat <<'EOF'
+#!/usr/bin/env bash
+set +e
+
+format_bytes_iec() {
+  awk -v value="$1" 'BEGIN {
+    split("B KB MB GB TB PB", units, " ");
+    idx = 1;
+    while (value >= 1024 && idx < 6) {
+      value /= 1024;
+      idx++;
+    }
+    if (idx == 1) {
+      printf "%.0f%s", value, units[idx];
+    } else {
+      printf "%.2f%s", value, units[idx];
+    }
+  }'
+}
+
+format_uptime_pretty() {
+  awk '{secs=$1; days=int(secs/86400); secs%=86400; hours=int(secs/3600); secs%=3600; mins=int(secs/60); printf "%d天 %d时 %d分", days, hours, mins}' /proc/uptime 2>/dev/null
+}
+
+format_hz_ghz() {
+  awk -v value="$1" 'BEGIN { if (value == "" || value == 0) { print "-"; } else { printf "%.1f GHz", value / 1000 } }'
+}
+
+kv_print() {
+  printf '%-16s %s\n' "$1" "$2"
+}
+
+hostname_value="$(hostname 2>/dev/null || echo "-")"
+os_name="$(. /etc/os-release 2>/dev/null && printf '%s' "${PRETTY_NAME:-${NAME:-unknown}}")"
+kernel_value="$(uname -r 2>/dev/null || echo "-")"
+arch_value="$(uname -m 2>/dev/null || echo "-")"
+cpu_model="$(awk -F: '/model name/ {gsub(/^[ \t]+/, "", $2); print $2; exit}' /proc/cpuinfo 2>/dev/null)"
+[ -n "${cpu_model}" ] || cpu_model="$(lscpu 2>/dev/null | awk -F: '/Model name/ {gsub(/^[ \t]+/, "", $2); print $2; exit}')"
+[ -n "${cpu_model}" ] || cpu_model="-"
+cpu_cores="$(nproc 2>/dev/null || echo "-")"
+cpu_freq_raw="$(awk -F: '/cpu MHz/ {gsub(/^[ \t]+/, "", $2); print $2; exit}' /proc/cpuinfo 2>/dev/null)"
+[ -n "${cpu_freq_raw}" ] || cpu_freq_raw="$(lscpu 2>/dev/null | awk -F: '/CPU max MHz|CPU MHz/ {gsub(/^[ \t]+/, "", $2); print $2; exit}')"
+cpu_freq_value="$(format_hz_ghz "${cpu_freq_raw}")"
+
+read_cpu_stat() {
+  awk '/^cpu / {print $2, $3, $4, $5, $6, $7, $8, $9, $10}' /proc/stat 2>/dev/null
+}
+
+read -r u1 n1 s1 i1 w1 irq1 sirq1 st1 g1 <<<"$(read_cpu_stat)"
+sleep 0.5
+read -r u2 n2 s2 i2 w2 irq2 sirq2 st2 g2 <<<"$(read_cpu_stat)"
+
+if [ -n "${u1}" ] && [ -n "${u2}" ]; then
+  idle_delta=$(( (i2 + w2) - (i1 + w1) ))
+  total1=$((u1 + n1 + s1 + i1 + w1 + irq1 + sirq1 + st1 + g1))
+  total2=$((u2 + n2 + s2 + i2 + w2 + irq2 + sirq2 + st2 + g2))
+  total_delta=$((total2 - total1))
+  if [ "${total_delta}" -gt 0 ] 2>/dev/null; then
+    cpu_usage="$(awk -v idle="${idle_delta}" -v total="${total_delta}" 'BEGIN { printf "%.0f%%", ((total - idle) / total) * 100 }')"
+  else
+    cpu_usage="-"
+  fi
+else
+  cpu_usage="-"
+fi
+
+read -r load1 load5 load15 _ <<<"$(awk '{print $1, $2, $3, $4}' /proc/loadavg 2>/dev/null)"
+[ -n "${load1}" ] || load1="-"
+[ -n "${load5}" ] || load5="-"
+[ -n "${load15}" ] || load15="-"
+
+tcp_count="$(ss -tan 2>/dev/null | tail -n +2 | wc -l | awk '{print $1}')"
+udp_count="$(ss -uan 2>/dev/null | tail -n +2 | wc -l | awk '{print $1}')"
+[ -n "${tcp_count}" ] || tcp_count="-"
+[ -n "${udp_count}" ] || udp_count="-"
+
+mem_total_mb="$(free -m 2>/dev/null | awk '/^Mem:/ {print $2}')"
+mem_used_mb="$(free -m 2>/dev/null | awk '/^Mem:/ {print $3}')"
+swap_total_mb="$(free -m 2>/dev/null | awk '/^Swap:/ {print $2}')"
+swap_used_mb="$(free -m 2>/dev/null | awk '/^Swap:/ {print $3}')"
+if [ -n "${mem_total_mb}" ] && [ "${mem_total_mb}" -gt 0 ] 2>/dev/null; then
+  mem_percent="$(awk -v used="${mem_used_mb}" -v total="${mem_total_mb}" 'BEGIN { printf "%.2f%%", (used / total) * 100 }')"
+  mem_value="${mem_used_mb}M/${mem_total_mb}M (${mem_percent})"
+else
+  mem_value="-"
+fi
+if [ -n "${swap_total_mb}" ] && [ "${swap_total_mb}" -gt 0 ] 2>/dev/null; then
+  swap_percent="$(awk -v used="${swap_used_mb}" -v total="${swap_total_mb}" 'BEGIN { printf "%.0f%%", (used / total) * 100 }')"
+  swap_value="${swap_used_mb}M/${swap_total_mb}M (${swap_percent})"
+else
+  swap_value="0M/0M (0%)"
+fi
+
+disk_line="$(df -h / 2>/dev/null | awk 'NR==2 {print $3 "|" $2 "|" $5}')"
+if [ -n "${disk_line}" ]; then
+  IFS='|' read -r disk_used disk_total disk_percent <<<"${disk_line}"
+  disk_value="${disk_used}/${disk_total} (${disk_percent})"
+else
+  disk_value="-"
+fi
+
+net_dev_line="$(awk -F'[: ]+' '$1 !~ /^(lo|Inter|face)$/ {rx += $3; tx += $11} END {print rx "|" tx}' /proc/net/dev 2>/dev/null)"
+IFS='|' read -r rx_bytes tx_bytes <<<"${net_dev_line}"
+[ -n "${rx_bytes}" ] || rx_bytes=0
+[ -n "${tx_bytes}" ] || tx_bytes=0
+rx_value="$(format_bytes_iec "${rx_bytes}")"
+tx_value="$(format_bytes_iec "${tx_bytes}")"
+
+cc_value="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "-")"
+qdisc_value="$(sysctl -n net.core.default_qdisc 2>/dev/null || echo "-")"
+network_algo="${cc_value} ${qdisc_value}"
+
+public_ip="-"
+if command -v curl >/dev/null 2>&1; then
+  public_ip="$(curl -fsS --max-time 4 ifconfig.me 2>/dev/null || curl -fsS --max-time 4 api.ipify.org 2>/dev/null || echo "-")"
+fi
+
+dns_value="$(awk '/^nameserver/ {print $2}' /etc/resolv.conf 2>/dev/null | paste -sd ',' -)"
+[ -n "${dns_value}" ] || dns_value="-"
+
+carrier_value="-"
+geo_value="-"
+if command -v curl >/dev/null 2>&1; then
+  ip_meta="$(curl -fsS --max-time 5 "https://ipinfo.io/${public_ip}/json" 2>/dev/null || true)"
+  if [ -n "${ip_meta}" ] && command -v python3 >/dev/null 2>&1; then
+    meta_output="$(
+      VPSCTL_IPINFO_JSON="${ip_meta}" python3 - <<'PY'
+import json
+import os
+
+raw = os.environ.get("VPSCTL_IPINFO_JSON", "")
+if not raw:
+    print("-|-")
+    raise SystemExit
+
+data = json.loads(raw)
+org = data.get("org") or "-"
+city = data.get("city") or ""
+region = data.get("region") or ""
+country = data.get("country") or ""
+parts = [item for item in (country, region, city) if item]
+geo = " ".join(parts) if parts else "-"
+print(f"{org}|{geo}")
+PY
+    )"
+    IFS='|' read -r carrier_value geo_value <<<"${meta_output}"
+  fi
+fi
+
+timezone_value="$(timedatectl show --property=Timezone --value 2>/dev/null || date '+%Z')"
+time_value="$(date '+%Y-%m-%d %I:%M %p' 2>/dev/null || echo "-")"
+uptime_value="$(format_uptime_pretty)"
+[ -n "${uptime_value}" ] || uptime_value="-"
+
+echo "[系统]"
+kv_print "主机名:" "${hostname_value}"
+kv_print "系统版本:" "${os_name:-"-"}"
+kv_print "Linux版本:" "${kernel_value}"
+echo "-------------"
+echo "[CPU]"
+kv_print "CPU架构:" "${arch_value}"
+kv_print "CPU型号:" "${cpu_model}"
+kv_print "CPU核心数:" "${cpu_cores}"
+kv_print "CPU频率:" "${cpu_freq_value}"
+echo "-------------"
+echo "[资源]"
+kv_print "CPU占用:" "${cpu_usage}"
+kv_print "系统负载:" "${load1}, ${load5}, ${load15}"
+kv_print "TCP|UDP连接数:" "${tcp_count}|${udp_count}"
+kv_print "物理内存:" "${mem_value}"
+kv_print "虚拟内存:" "${swap_value}"
+kv_print "硬盘占用:" "${disk_value}"
+echo "-------------"
+echo "[流量]"
+kv_print "总接收:" "${rx_value}"
+kv_print "总发送:" "${tx_value}"
+echo "-------------"
+echo "[网络]"
+kv_print "网络算法:" "${network_algo}"
+echo "-------------"
+echo "[定位]"
+kv_print "运营商:" "${carrier_value}"
+kv_print "IPv4地址:" "${public_ip}"
+kv_print "DNS地址:" "${dns_value}"
+kv_print "地理位置:" "${geo_value}"
+kv_print "系统时间:" "${timezone_value} ${time_value}"
+echo "-------------"
+echo "[运行]"
+kv_print "运行时长:" "${uptime_value}"
 EOF
 }
 
@@ -448,6 +727,115 @@ parse_run_args() {
   fi
 
   RUN_COMMAND="$*"
+}
+
+parse_code_args() {
+  CODE_TARGET=""
+  CODE_PATH=""
+  CODE_BACKUP_BEFORE_OPEN=0
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --backup)
+        CODE_BACKUP_BEFORE_OPEN=1
+        ;;
+      --parallel|-p)
+        echo "code 是本机打开 VS Code，不支持并发参数。"
+        return 1
+        ;;
+      *)
+        if [[ -z "${CODE_TARGET}" ]]; then
+          CODE_TARGET="$1"
+        elif [[ -z "${CODE_PATH}" ]]; then
+          CODE_PATH="$1"
+        else
+          echo "code 参数写多了: $1"
+          return 1
+        fi
+        ;;
+    esac
+    shift
+  done
+
+  if [[ -z "${CODE_TARGET}" ]]; then
+    echo "用法: vps code <name> [path]"
+    return 1
+  fi
+
+  if [[ "${CODE_TARGET}" == "all" ]]; then
+    echo "code 只支持单台机器。"
+    return 1
+  fi
+}
+
+parse_backup_args() {
+  BACKUP_TARGET=""
+  BACKUP_PATH=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --parallel|-p)
+        echo "backup 是单机操作，不支持并发参数。"
+        return 1
+        ;;
+      *)
+        if [[ -z "${BACKUP_TARGET}" ]]; then
+          BACKUP_TARGET="$1"
+        elif [[ -z "${BACKUP_PATH}" ]]; then
+          BACKUP_PATH="$1"
+        else
+          echo "backup 参数写多了: $1"
+          return 1
+        fi
+        ;;
+    esac
+    shift
+  done
+
+  if [[ -z "${BACKUP_TARGET}" || -z "${BACKUP_PATH}" ]]; then
+    echo "用法: vps backup <name> <path>"
+    return 1
+  fi
+
+  if [[ "${BACKUP_TARGET}" == "all" ]]; then
+    echo "backup 只支持单台机器。"
+    return 1
+  fi
+}
+
+parse_doctor_args() {
+  DOCTOR_TARGET=""
+  DOCTOR_SUBJECT=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --parallel|-p)
+        echo "doctor 是单机诊断，不支持并发参数。"
+        return 1
+        ;;
+      *)
+        if [[ -z "${DOCTOR_TARGET}" ]]; then
+          DOCTOR_TARGET="$1"
+        elif [[ -z "${DOCTOR_SUBJECT}" ]]; then
+          DOCTOR_SUBJECT="$1"
+        else
+          echo "doctor 参数写多了: $1"
+          return 1
+        fi
+        ;;
+    esac
+    shift
+  done
+
+  if [[ -z "${DOCTOR_TARGET}" ]]; then
+    echo "用法: vps doctor <name> [service|container]"
+    return 1
+  fi
+
+  if [[ "${DOCTOR_TARGET}" == "all" ]]; then
+    echo "doctor 先只支持单台机器，别一口气全搂上。"
+    return 1
+  fi
 }
 
 parse_cbatch_args() {
@@ -561,7 +949,9 @@ print_containers_for_target() {
     return 0
   fi
 
+  print_section_title "容器列表 · ${target}"
   printf '%-4s %-24s %-28s %s\n' "序号" "容器名" "镜像" "状态"
+  print_rule
   local idx=1
   for item in "${CONTAINER_LINES[@]}"; do
     IFS='|' read -r name image status <<< "${item}"
@@ -757,6 +1147,561 @@ copy_key() {
     "umask 077 && mkdir -p ~/.ssh && touch ~/.ssh/authorized_keys && cat > ~/.ssh/vps_tmp_key && (grep -qxFf ~/.ssh/vps_tmp_key ~/.ssh/authorized_keys || cat ~/.ssh/vps_tmp_key >> ~/.ssh/authorized_keys) && rm -f ~/.ssh/vps_tmp_key" \
     < "${pubkey}"
   echo "公钥已写入 ${SERVER_NAME}"
+}
+
+build_managed_ssh_config_block() {
+  local line
+
+  printf '%s\n' "${SSH_CONFIG_BEGIN}"
+  printf '%s\n' "# generated by ${APP_NAME} ${APP_VERSION}"
+  while IFS= read -r line; do
+    parse_server "${line}"
+    printf '%s\n' "Host ${SERVER_NAME}"
+    printf '%s\n' "  HostName ${SERVER_HOST}"
+    printf '%s\n' "  User ${SERVER_USER}"
+    printf '%s\n' "  Port ${SERVER_PORT}"
+    printf '%s\n' "  ServerAliveInterval 15"
+    printf '%s\n' "  ServerAliveCountMax 2"
+    printf '%s\n' "  StrictHostKeyChecking accept-new"
+    if [[ "${SERVER_KEY}" != "-" ]]; then
+      printf '%s\n' "  IdentityFile ${SERVER_KEY}"
+      printf '%s\n' "  IdentitiesOnly yes"
+    fi
+    echo
+  done < <(each_server)
+  printf '%s\n' "${SSH_CONFIG_END}"
+}
+
+sync_ssh_config() {
+  local config_file="${1:-${SSH_CONFIG_FILE}}"
+  local config_dir
+  local tmp_file
+  local new_file
+  local backup_file
+  local line
+  local inside_block=0
+
+  config_dir="$(dirname "${config_file}")"
+  mkdir -p "${config_dir}"
+  [[ -f "${config_file}" ]] || : > "${config_file}"
+
+  tmp_file="$(mktemp)"
+  new_file="$(mktemp)"
+  backup_file="${config_file}.bak"
+
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    if [[ "${line}" == "${SSH_CONFIG_BEGIN}" ]]; then
+      inside_block=1
+      continue
+    fi
+    if [[ "${line}" == "${SSH_CONFIG_END}" ]]; then
+      inside_block=0
+      continue
+    fi
+    if [[ ${inside_block} -eq 0 ]]; then
+      printf '%s\n' "${line}" >> "${tmp_file}"
+    fi
+  done < "${config_file}"
+
+  cp "${config_file}" "${backup_file}"
+  cat "${tmp_file}" > "${new_file}"
+  if [[ -s "${new_file}" ]]; then
+    printf '\n' >> "${new_file}"
+  fi
+  build_managed_ssh_config_block >> "${new_file}"
+  mv "${new_file}" "${config_file}"
+  chmod 600 "${config_file}" 2>/dev/null || true
+  rm -f "${tmp_file}"
+
+  echo "SSH 配置已同步: ${config_file}"
+  echo "备份文件: ${backup_file}"
+}
+
+ensure_code_cli() {
+  local candidate
+  local -a candidates=(
+    "${CODE_BIN}"
+    "code"
+    "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"
+    "${HOME}/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"
+    "/Applications/Visual Studio Code - Insiders.app/Contents/Resources/app/bin/code"
+    "${HOME}/Applications/Visual Studio Code - Insiders.app/Contents/Resources/app/bin/code"
+  )
+
+  for candidate in "${candidates[@]}"; do
+    [[ -z "${candidate}" ]] && continue
+    if command -v "${candidate}" >/dev/null 2>&1; then
+      RESOLVED_CODE_BIN="$(command -v "${candidate}")"
+      return 0
+    fi
+    if [[ -x "${candidate}" ]]; then
+      RESOLVED_CODE_BIN="${candidate}"
+      return 0
+    fi
+  done
+
+  echo "没找到 VS Code 命令行工具。"
+  echo "已尝试: ${CODE_BIN}、code，以及常见 macOS 安装路径。"
+  echo "你可以："
+  echo "1. 在 VS Code 命令面板执行: Shell Command: Install 'code' command in PATH"
+  echo "2. 或者设置环境变量 VPSCTL_CODE_BIN 指向 code 的实际路径"
+  return 1
+}
+
+resolve_remote_home() {
+  local target="$1"
+  local line
+
+  if ! line="$(find_server "${target}")"; then
+    echo "没找到服务器: ${target}" >&2
+    return 1
+  fi
+
+  capture_remote_command "${line}" "printf '%s\n' \"\$HOME\"" "serial"
+  if [[ ${CAPTURED_REMOTE_STATUS} -ne 0 ]]; then
+    echo "读取远程 HOME 目录失败: ${target}" >&2
+    [[ -n "${CAPTURED_REMOTE_OUTPUT}" ]] && echo "${CAPTURED_REMOTE_OUTPUT}" >&2
+    return 1
+  fi
+  printf '%s\n' "$(trim "${CAPTURED_REMOTE_OUTPUT}")"
+}
+
+resolve_remote_code_path() {
+  local target="$1"
+  local requested_path="${2:-}"
+  local remote_home
+
+  remote_home="$(resolve_remote_home "${target}")" || return 1
+
+  if [[ -z "${requested_path}" ]]; then
+    printf '%s\n' "${remote_home}"
+    return 0
+  fi
+
+  case "${requested_path}" in
+    /|rootfs|fs)
+      printf '%s\n' "/"
+      return 0
+      ;;
+    home)
+      printf '%s\n' "/home"
+      return 0
+      ;;
+    root)
+      printf '%s\n' "/root"
+      return 0
+      ;;
+    etc)
+      printf '%s\n' "/etc"
+      return 0
+      ;;
+    var)
+      printf '%s\n' "/var"
+      return 0
+      ;;
+    opt)
+      printf '%s\n' "/opt"
+      return 0
+      ;;
+    srv)
+      printf '%s\n' "/srv"
+      return 0
+      ;;
+    usr)
+      printf '%s\n' "/usr"
+      return 0
+      ;;
+  esac
+
+  if [[ "${requested_path}" == /* ]]; then
+    printf '%s\n' "${requested_path}"
+    return 0
+  fi
+
+  if [[ "${requested_path}" == "~" ]]; then
+    printf '%s\n' "${remote_home}"
+    return 0
+  fi
+
+  if [[ "${requested_path}" == "~/"* ]]; then
+    printf '%s\n' "${remote_home}/${requested_path#~/}"
+    return 0
+  fi
+
+  printf '%s\n' "${remote_home}/${requested_path}"
+}
+
+backup_remote_path() {
+  local target="$1"
+  local requested_path="$2"
+  local line
+  local resolved_path
+  local backup_command
+
+  if ! line="$(find_server "${target}")"; then
+    echo "没找到服务器: ${target}"
+    return 1
+  fi
+
+  resolved_path="$(resolve_remote_code_path "${target}" "${requested_path}")" || return 1
+
+  if [[ "${resolved_path}" == "/" || "${resolved_path}" == "/root" || "${resolved_path}" == "/home" ]]; then
+    echo "这个路径太大了，不建议整目录直接备份: ${resolved_path}"
+    echo "请改成更具体的目录或文件，例如 /etc/nginx 或 /opt/app/.env"
+    return 1
+  fi
+
+  backup_command="$(cat <<EOF
+set -e
+target_path=$(quote_for_single_shell "${resolved_path}")
+backup_base="\$HOME/.vps-pilot/backups"
+timestamp="\$(date '+%Y%m%d-%H%M%S')"
+safe_name="\$(printf '%s' "\$target_path" | tr '/ ' '__')"
+mkdir -p "\$backup_base"
+if [ -d "\$target_path" ]; then
+  archive_path="\$backup_base/\${timestamp}-\${safe_name}.tar.gz"
+  tar -czf "\$archive_path" -C "\$(dirname "\$target_path")" "\$(basename "\$target_path")"
+  printf 'backup: %s\n' "\$archive_path"
+elif [ -f "\$target_path" ]; then
+  dir_path="\$backup_base/\${timestamp}-\${safe_name}"
+  mkdir -p "\$dir_path"
+  cp -a "\$target_path" "\$dir_path/"
+  printf 'backup: %s\n' "\$dir_path"
+else
+  echo "目标路径不存在: \$target_path" >&2
+  exit 1
+fi
+EOF
+)"
+
+  capture_remote_command "${line}" "${backup_command}" "serial"
+  if [[ ${CAPTURED_REMOTE_STATUS} -ne 0 ]]; then
+    echo "备份失败: ${target}:${resolved_path}"
+    [[ -n "${CAPTURED_REMOTE_OUTPUT}" ]] && echo "${CAPTURED_REMOTE_OUTPUT}"
+    return 1
+  fi
+
+  echo "已创建备份: ${target}:${resolved_path}"
+  echo "${CAPTURED_REMOTE_OUTPUT}"
+}
+
+open_remote_in_code() {
+  local target="$1"
+  local requested_path="${2:-}"
+  local resolved_path
+
+  ensure_code_cli || return 1
+  sync_ssh_config "${SSH_CONFIG_FILE}"
+  resolved_path="$(resolve_remote_code_path "${target}" "${requested_path}")" || return 1
+
+  if [[ ${CODE_BACKUP_BEFORE_OPEN:-0} -eq 1 ]]; then
+    backup_remote_path "${target}" "${resolved_path}" || return 1
+  fi
+
+  if [[ "${resolved_path}" == /etc* || "${resolved_path}" == /opt* || "${resolved_path}" == /var* ]]; then
+    echo "提示: 这是生产味很重的目录，Remote-SSH 保存就是直接改远程文件。"
+    echo "建议先执行: vps backup ${target} ${resolved_path}"
+  fi
+
+  echo "正在打开 VS Code Remote-SSH: ${target}:${resolved_path}"
+  "${RESOLVED_CODE_BIN}" --remote "ssh-remote+${target}" "${resolved_path}"
+}
+
+parse_ssh_config_args() {
+  SSH_CONFIG_ACTION="sync"
+  SSH_CONFIG_TARGET_FILE="${SSH_CONFIG_FILE}"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      sync|show)
+        SSH_CONFIG_ACTION="$1"
+        ;;
+      --file)
+        shift
+        [[ $# -gt 0 ]] || { echo "--file 后面要跟路径"; return 1; }
+        SSH_CONFIG_TARGET_FILE="$(expand_home "$1")"
+        ;;
+      *)
+        echo "用法: vps ssh-config [sync|show] [--file path]"
+        return 1
+        ;;
+    esac
+    shift
+  done
+}
+
+print_ssh_config_preview() {
+  build_managed_ssh_config_block
+}
+
+json_escape() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//$'\n'/\\n}"
+  value="${value//$'\r'/\\r}"
+  value="${value//$'\t'/\\t}"
+  printf '%s' "${value}"
+}
+
+doctor_remote_script() {
+  local subject="${1:-}"
+  local quoted_subject
+  quoted_subject="$(quote_for_single_shell "${subject}")"
+
+  cat <<EOF
+subject=${quoted_subject}
+echo "## 基础信息"
+echo "hostname: \$(hostname)"
+echo "time: \$(date '+%F %T %Z')"
+echo "user: \$(whoami)"
+echo "uptime: \$(uptime)"
+if [ -f /etc/os-release ]; then
+  echo "-- os-release --"
+  sed -n '1,6p' /etc/os-release
+fi
+echo "-- disk --"
+df -h /
+echo "-- memory --"
+free -h 2>/dev/null || awk '/MemTotal|MemAvailable|SwapTotal|SwapFree/ {print}' /proc/meminfo 2>/dev/null || true
+echo "-- load --"
+cat /proc/loadavg 2>/dev/null || true
+echo "-- top cpu --"
+ps -eo pid,comm,%cpu,%mem --sort=-%cpu 2>/dev/null | head -n 8 || true
+echo "-- failed services --"
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl --failed --no-pager 2>/dev/null || true
+else
+  echo "systemctl unavailable"
+fi
+echo
+echo "## 最近错误"
+if command -v journalctl >/dev/null 2>&1; then
+  journalctl -p err -n 60 --no-pager 2>&1 || true
+else
+  echo "journalctl unavailable"
+fi
+echo
+echo "## 网络监听"
+ss -tulpn 2>/dev/null | head -n 40 || netstat -tulpn 2>/dev/null | head -n 40 || echo "port info unavailable"
+echo
+echo "## Docker 概览"
+if command -v docker >/dev/null 2>&1; then
+  docker ps -a --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}' 2>/dev/null || true
+else
+  echo "docker unavailable"
+fi
+
+if [ -n "\${subject}" ]; then
+  echo
+  echo "## 指定对象"
+  echo "subject: \${subject}"
+  if command -v systemctl >/dev/null 2>&1; then
+    echo "-- systemctl status \${subject} --"
+    systemctl status "\${subject}" --no-pager -l 2>&1 | tail -n 80 || true
+    echo "-- journalctl -u \${subject} --"
+    journalctl -u "\${subject}" -n 80 --no-pager 2>&1 || true
+  fi
+  if command -v docker >/dev/null 2>&1 && docker ps -a --format '{{.Names}}' 2>/dev/null | grep -Fxq "\${subject}"; then
+    echo "-- docker inspect \${subject} --"
+    docker inspect --format 'status={{.State.Status}} restart={{.RestartCount}} exit={{.State.ExitCode}} started={{.State.StartedAt}} finished={{.State.FinishedAt}}' "\${subject}" 2>&1 || true
+    echo "-- docker logs \${subject} --"
+    docker logs --tail 120 "\${subject}" 2>&1 || true
+  fi
+fi
+EOF
+}
+
+heuristic_doctor_analysis() {
+  local report="$1"
+  local lower
+  local -a findings=()
+  local -a suggestions=()
+  local i
+
+  lower="$(printf '%s' "${report}" | tr '[:upper:]' '[:lower:]')"
+
+  if [[ "${lower}" == *"no space left on device"* || "${lower}" == *"disk /:"*85* || "${lower}" == *"disk /:"*90* ]]; then
+    findings+=("磁盘空间很可能顶满了，服务写日志或写临时文件时会直接报错。")
+    suggestions+=("先看 df -h，再用 du -sh /* 2>/dev/null | sort -h 找大目录。")
+  fi
+
+  if [[ "${lower}" == *"oom"* || "${lower}" == *"out of memory"* || "${lower}" == *"killed process"* ]]; then
+    findings+=("机器出现了内存压力，进程可能被系统直接杀掉。")
+    suggestions+=("先看 free -h、dmesg 或 journalctl，再决定是限流、重启服务还是加 swap。")
+  fi
+
+  if [[ "${lower}" == *"address already in use"* || "${lower}" == *"bind:"* ]]; then
+    findings+=("端口冲突，已经有别的进程占住了目标端口。")
+    suggestions+=("用 ss -tulpn 定位占用进程，再决定换端口还是停掉旧进程。")
+  fi
+
+  if [[ "${lower}" == *"permission denied"* ]]; then
+    findings+=("权限不够，常见于文件权限、目录属主或 SELinux/AppArmor 限制。")
+    suggestions+=("先检查 ls -l、id、systemctl status，对照服务运行用户排查。")
+  fi
+
+  if [[ "${lower}" == *"unit "* && "${lower}" == *"could not be found"* ]]; then
+    findings+=("指定的 systemd 服务名不存在，可能服务实际名字写错了，或者这个服务本来就跑在容器里。")
+    suggestions+=("先执行 systemctl list-units --type=service | grep -i 关键字，或者改查对应容器日志。")
+  fi
+
+  if [[ "${lower}" == *"connection refused"* || "${lower}" == *"failed to connect"* ]]; then
+    findings+=("连接被拒绝，通常是上游服务没起来、监听地址不对，或者防火墙拦了。")
+    suggestions+=("确认目标服务是否在监听端口，再检查配置里的 host/port 和防火墙规则。")
+  fi
+
+  if [[ "${lower}" == *"502 bad gateway"* || "${lower}" == *"upstream prematurely closed connection"* ]]; then
+    findings+=("像是反向代理到上游应用之间出问题了，Nginx 只是表象。")
+    suggestions+=("先看 Nginx 错误日志，再看上游应用进程和容器日志。")
+  fi
+
+  if [[ "${lower}" == *"module not found"* || "${lower}" == *"command not found"* || "${lower}" == *"no such file or directory"* ]]; then
+    findings+=("依赖、二进制或路径配置不完整。")
+    suggestions+=("检查启动命令、环境变量、工作目录，以及最近是否改过部署路径。")
+  fi
+
+  echo "==== 本地规则分析 ===="
+  if [[ ${#findings[@]} -eq 0 ]]; then
+    echo "暂时没命中明显的报错特征，但原始诊断信息已经抓下来了，适合继续做人工排查或 AI 分析。"
+    return 0
+  fi
+
+  for ((i=0; i<${#findings[@]}; i++)); do
+    printf '[%d] %s\n' "$((i + 1))" "${findings[$i]}"
+    printf '    建议: %s\n' "${suggestions[$i]}"
+  done
+}
+
+call_ai_doctor() {
+  local target="$1"
+  local subject="$2"
+  local report="$3"
+  local payload response status
+
+  if [[ -z "${AI_API_KEY}" || -z "${AI_MODEL}" ]]; then
+    echo "未配置 AI 分析。可设置 VPSCTL_AI_API_KEY 和 VPSCTL_AI_MODEL 后重试。"
+    return 1
+  fi
+
+  if ! command -v curl >/dev/null 2>&1; then
+    echo "本机缺少 curl，AI 分析没法调用接口。"
+    return 1
+  fi
+
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "本机缺少 python3，暂时没法解析 AI 接口返回。"
+    return 1
+  fi
+
+  payload="$(
+    VPSCTL_DOCTOR_TARGET="${target}" \
+    VPSCTL_DOCTOR_SUBJECT="${subject}" \
+    VPSCTL_DOCTOR_REPORT="${report}" \
+    VPSCTL_DOCTOR_MODEL="${AI_MODEL}" \
+    python3 - <<'PY'
+import json
+import os
+
+report = os.environ.get("VPSCTL_DOCTOR_REPORT", "")
+if len(report) > 16000:
+    report = report[:16000] + "\n\n[truncated]"
+
+subject = os.environ.get("VPSCTL_DOCTOR_SUBJECT") or "未指定"
+payload = {
+    "model": os.environ["VPSCTL_DOCTOR_MODEL"],
+    "temperature": 0.2,
+    "messages": [
+        {
+            "role": "system",
+            "content": "你是资深 Linux / Docker / Nginx 运维工程师。请用简体中文输出，先给结论，再给依据，再给可执行修复命令。不要泛泛而谈。"
+        },
+        {
+            "role": "user",
+            "content": f"目标机器: {os.environ.get('VPSCTL_DOCTOR_TARGET', '')}\n指定对象: {subject}\n\n下面是诊断采集结果，请分析最可能的根因、优先排查顺序、以及可以直接执行的命令。\n\n{report}"
+        }
+    ]
+}
+print(json.dumps(payload, ensure_ascii=False))
+PY
+  )"
+
+  set +e
+  response="$(curl -fsS "${AI_API_URL}" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer ${AI_API_KEY}" \
+    -d "${payload}" 2>&1)"
+  status=$?
+  set -e
+
+  if [[ ${status} -ne 0 ]]; then
+    echo "AI 接口调用失败:"
+    echo "${response}"
+    return 1
+  fi
+
+  VPSCTL_DOCTOR_RESPONSE="${response}" python3 - <<'PY'
+import json
+import os
+import sys
+
+raw = os.environ.get("VPSCTL_DOCTOR_RESPONSE", "")
+data = json.loads(raw)
+content = ""
+
+if isinstance(data, dict) and data.get("choices"):
+    message = data["choices"][0].get("message", {})
+    content = message.get("content", "")
+elif isinstance(data, dict) and data.get("output"):
+    chunks = []
+    for item in data["output"]:
+        for content_item in item.get("content", []):
+            if content_item.get("type") in ("output_text", "text"):
+                chunks.append(content_item.get("text", ""))
+    content = "\n".join(chunks)
+
+if isinstance(content, list):
+    text_parts = []
+    for item in content:
+      if isinstance(item, dict) and item.get("type") == "text":
+          text_parts.append(item.get("text", ""))
+      elif isinstance(item, str):
+          text_parts.append(item)
+    content = "\n".join(text_parts)
+
+print(content.strip())
+PY
+}
+
+doctor_target() {
+  local target="$1"
+  local subject="${2:-}"
+  local line report
+
+  if ! line="$(find_server "${target}")"; then
+    echo "没找到服务器: ${target}"
+    return 1
+  fi
+
+  print_rule
+  printf '%s %s%s\n' "$(style_text "${STYLE_LABEL}" "诊断目标")" "$(style_text "${STYLE_VALUE}" "${target}")" "${subject:+ $(style_text "${STYLE_MUTED}" "(${subject})")}"
+  capture_remote_command "${line}" "$(doctor_remote_script "${subject}")" "serial"
+  if [[ ${CAPTURED_REMOTE_STATUS} -ne 0 ]]; then
+    printf '%s %s\n' "$(format_status_label "诊断采集失败" "fail")" "$(style_text "${STYLE_VALUE}" "${target}")"
+    [[ -n "${CAPTURED_REMOTE_OUTPUT}" ]] && echo "${CAPTURED_REMOTE_OUTPUT}"
+    return 1
+  fi
+
+  report="${CAPTURED_REMOTE_OUTPUT}"
+  print_section_title "远程诊断原始信息"
+  echo "${report}"
+  echo
+  heuristic_doctor_analysis "${report}"
+  echo
+  print_section_title "AI 分析"
+  if ! call_ai_doctor "${target}" "${subject}" "${report}"; then
+    echo "AI 分析未启用或调用失败，上面那份原始信息和本地规则分析还能继续用。"
+  fi
 }
 
 validate_config() {
@@ -1144,6 +2089,11 @@ menu() {
       3)
         run_for_target "all" "$(check_remote_script)" "serial"
         ;;
+      d|D)
+        read -r -p "输入服务器名: " target
+        read -r -p "输入服务名或容器名（可留空）: " remote_cmd
+        doctor_target "${target}" "${remote_cmd}"
+        ;;
       4)
         run_for_target "all" "sudo apt update"
         ;;
@@ -1153,6 +2103,16 @@ menu() {
       6)
         read -r -p "输入服务器名: " target
         ssh_into_server "${target}"
+        ;;
+      c|C)
+        read -r -p "输入服务器名: " target
+        read -r -p "输入远程目录（默认当前登录用户家目录，如 root=/root）: " remote_cmd
+        open_remote_in_code "${target}" "${remote_cmd}"
+        ;;
+      k|K)
+        read -r -p "输入服务器名: " target
+        read -r -p "输入要备份的远程路径: " remote_cmd
+        backup_remote_path "${target}" "${remote_cmd}"
         ;;
       7)
         read -r -p "输入目标（服务器名或 all，默认 all）: " target
@@ -1171,6 +2131,9 @@ menu() {
           remote_cmd="${SELECTED_CONTAINER}"
         fi
         batch_console "${target}" "serial" "container" "${remote_cmd}"
+        ;;
+      s|S)
+        sync_ssh_config "${SSH_CONFIG_FILE}"
         ;;
       u|U)
         read -r -p "输入目标（服务器名或 all）: " target
@@ -1216,6 +2179,18 @@ normalize_cmd() {
     ssh|login )
       printf '%s\n' "ssh"
       ;;
+    code|vscode )
+      printf '%s\n' "code"
+      ;;
+    backup|snapshot )
+      printf '%s\n' "backup"
+      ;;
+    docker )
+      printf '%s\n' "containers"
+      ;;
+    ssh-config|sshconfig )
+      printf '%s\n' "ssh-config"
+      ;;
     run|exec )
       printf '%s\n' "run"
       ;;
@@ -1224,6 +2199,9 @@ normalize_cmd() {
       ;;
     check )
       printf '%s\n' "check"
+      ;;
+    doctor|diag|diagnose )
+      printf '%s\n' "doctor"
       ;;
     batch|console )
       printf '%s\n' "batch"
@@ -1279,6 +2257,25 @@ main() {
       [[ $# -ge 2 ]] || { echo "用法: vps ssh <name>"; exit 1; }
       ssh_into_server "$2"
       ;;
+    code)
+      parse_code_args "${@:2}" || exit 1
+      open_remote_in_code "${CODE_TARGET}" "${CODE_PATH}"
+      ;;
+    backup)
+      parse_backup_args "${@:2}" || exit 1
+      backup_remote_path "${BACKUP_TARGET}" "${BACKUP_PATH}"
+      ;;
+    ssh-config)
+      parse_ssh_config_args "${@:2}" || exit 1
+      case "${SSH_CONFIG_ACTION}" in
+        sync)
+          sync_ssh_config "${SSH_CONFIG_TARGET_FILE}"
+          ;;
+        show)
+          print_ssh_config_preview
+          ;;
+      esac
+      ;;
     run)
       parse_run_args "${@:2}" || exit 1
       if [[ "${RUN_MODE}" == "parallel" && "${RUN_TARGET}" != "all" ]]; then
@@ -1288,11 +2285,19 @@ main() {
       ;;
     status)
       parse_target_mode_args "${@:2}" || exit 1
-      run_for_target "${PARSED_TARGET}" "$(status_remote_script)" "${PARSED_MODE}"
+      if [[ "${PARSED_TARGET}" == "all" ]]; then
+        run_for_target "${PARSED_TARGET}" "$(status_remote_script)" "${PARSED_MODE}"
+      else
+        run_for_target "${PARSED_TARGET}" "$(status_detail_remote_script)" "serial"
+      fi
       ;;
     check)
       parse_target_mode_args "${@:2}" || exit 1
       run_for_target "${PARSED_TARGET}" "$(check_remote_script)" "${PARSED_MODE}"
+      ;;
+    doctor)
+      parse_doctor_args "${@:2}" || exit 1
+      doctor_target "${DOCTOR_TARGET}" "${DOCTOR_SUBJECT}"
       ;;
     batch)
       parse_target_mode_args "${@:2}" || exit 1

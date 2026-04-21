@@ -8,7 +8,7 @@
 
 多台 VPS 的本地统一控制工具。
 
-- 版本：`v0.0.2`
+- 版本：`v0.0.3-dev`
 - 作者：`markyal`
 - 主命令：`vps`
 
@@ -49,8 +49,10 @@
 
 - 多台 VPS 统一纳管
 - SSH 登录与基础连接封装
+- VS Code Remote-SSH 远程目录打开
 - 批量命令执行与结果汇总
 - 状态查看与基础巡检
+- 报错上下文采集与诊断分析
 - 容器列表查看
 - 容器内批量命令会话
 
@@ -68,6 +70,7 @@
 - 菜单入口与直接命令并存
 - 批量命令会话支持历史记录、快捷词、命令重跑
 - 容器会话支持容器列表选择，减少记忆容器名的负担
+- AI 诊断支持 OpenAI 兼容接口
 
 ---
 
@@ -75,11 +78,34 @@
 
 推荐按以下顺序完成初始化：
 
-1. 编写服务器配置
-2. 同步 SSH 公钥
-3. 开始使用命令或菜单
+1. 拉取项目代码
+2. 安装与运行
+3. 编写服务器配置
+4. 开始使用命令或菜单
 
-### 第一步：编写服务器配置
+### 第一步：拉取项目代码
+
+```bash
+git clone https://github.com/maya1900/vps-pilot.git
+cd vps-pilot
+```
+
+### 第二步：安装与运行
+
+macOS / Linux：
+
+```bash
+chmod +x "./vps" "./vpsctl"
+./vps version
+```
+
+Windows：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\vps.ps1 version
+```
+
+### 第三步：编写服务器配置
 
 复制示例配置：
 
@@ -109,9 +135,9 @@ oc2|root|192.168.1.11|22|-
 vps validate
 ```
 
-### 第二步：同步公钥
+如果远程主机还没有配置免密登录，建议在配置完成后同步 SSH 公钥。
 
-如果远程主机还没有配置免密登录，请先确认本机已有 SSH 公钥，例如：
+请先确认本机已有 SSH 公钥，例如：
 
 ```bash
 ~/.ssh/id_ed25519.pub
@@ -130,7 +156,7 @@ vps copy-key oc2
 vps ssh oc1
 ```
 
-### 第三步：开始使用
+### 第四步：开始使用
 
 ```bash
 vps
@@ -195,8 +221,12 @@ bash ./vps
 ```bash
 vps list
 vps ssh <name>
+vps code <name> [path] [--backup]
+vps backup <name> <path>
+vps ssh-config sync
 vps status [name|all] [--parallel]
 vps check [name|all] [--parallel]
+vps doctor <name> [service|container]
 vps batch <name|all> [--parallel]
 vps containers <name>
 vps cbatch <name> [container]
@@ -214,8 +244,12 @@ vps help
 
 - `list`：查看服务器列表
 - `ssh`：登录指定服务器
-- `status`：查看服务器状态，包括时间、磁盘、内存、负载、服务状态与公网 IP
+- `code`：用 VS Code 打开远程目录，可选打开前先备份
+- `backup`：先备份远程文件或目录
+- `ssh-config`：同步本机 `~/.ssh/config`，方便 Remote-SSH 使用
+- `status`：查看服务器状态；`all` 为简洁汇总，单机时输出更详细的系统信息
 - `check`：执行基础巡检，检查磁盘、内存、服务等明显异常
+- `doctor`：采集系统、服务、容器报错信息，并输出诊断结果
 - `batch`：进入批量命令会话，连续执行多条命令
 - `containers`：列出指定服务器上的容器
 - `cbatch`：进入容器批量命令会话
@@ -243,6 +277,25 @@ vps help
 
 ```bash
 VPSCTL_CONFIG=/path/to/servers.conf vps list
+```
+
+可选环境变量：
+
+```bash
+VPSCTL_SSH_CONFIG_FILE=~/.ssh/config
+VPSCTL_CODE_BIN=code
+VPSCTL_AI_API_KEY=your_api_key
+VPSCTL_AI_MODEL=gpt-4o-mini
+VPSCTL_AI_API_URL=https://api.openai.com/v1/chat/completions
+```
+
+说明：
+
+- 如果 `code` 不在全局 `PATH` 里，脚本会继续尝试常见的 macOS 安装路径
+- 也可以手动指定：
+
+```bash
+VPSCTL_CODE_BIN="/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code" vps code oc1
 ```
 
 ### 示例配置
@@ -275,10 +328,47 @@ vps status
 vps status --parallel
 ```
 
+### 查看单台机器详细状态
+
+```bash
+vps status oc1
+```
+
+说明：
+
+- `vps status` 或 `vps status all` 适合批量巡检
+- `vps status oc1` 适合单机深看，会展示主机、系统、CPU、内存、磁盘、网络、运营商、时间、运行时长等信息
+
 ### 执行基础巡检
 
 ```bash
 vps check
+```
+
+### 在 VS Code 中打开远程目录
+
+```bash
+vps ssh-config sync
+vps code oc1
+vps code oc1 /home
+vps code oc1 /opt/app
+vps code oc1 etc
+vps code oc1 /etc/nginx --backup
+```
+
+路径说明：
+
+- 不传路径时，默认打开远程登录用户的家目录
+- 例如：`root -> /root`，`ubuntu -> /home/ubuntu`，`opc -> /home/opc`
+- 传绝对路径时，直接打开对应目录，例如 `/home`、`/opt/app`
+- 也支持几个常用短写：`home`、`etc`、`var`、`opt`、`srv`、`usr`、`/`
+
+### 诊断服务或容器问题
+
+```bash
+vps doctor oc1
+vps doctor oc1 nginx
+vps doctor oc1 my-container
 ```
 
 ### 批量执行命令
@@ -300,6 +390,20 @@ vps upgrade
 ```bash
 vps copy-key oc1
 ```
+
+### 先备份再改远程文件
+
+```bash
+vps backup oc1 /etc/nginx
+vps backup oc1 /opt/app/.env
+vps code oc1 /etc/nginx --backup
+```
+
+说明：
+
+- Remote-SSH 保存时会直接修改远程文件
+- 对 `/etc`、`/opt`、`/var` 这类目录，建议先备份再编辑
+- `backup` 会把备份放到远程 `~/.vps-pilot/backups/` 下
 
 ---
 
@@ -433,20 +537,23 @@ vps
 
 ---
 
-## 下一版本开发清单
+## 开发规划
 
-下一版本计划见：
+- 下一版本方向见 [ROADMAP.md](./ROADMAP.md)
+- 设计与分期实现说明见 [docs/development-plan.md](./docs/development-plan.md)
 
-- [ROADMAP.md](./ROADMAP.md)
+当前已落地的一期能力：
 
-当前已整理的下一版本方向包括：
+- `ssh-config sync`
+- `code <name> [path] [--backup]`
+- `backup <name> <path>`
+- `doctor <name> [service|container]`
 
-- 主机分组与标签管理
-- 常用任务预设库
-- `status` / `check` 输出样式优化
-- 容器列表按运行状态分组
-- 更细粒度的 SSH 配置模板
-- 巡检结果导出能力
+下一步重点方向：
+
+- 对话式 `vps chat <name>` 运维助手
+- 远程目录挂载能力
+- 诊断结果导出与复盘
 
 ---
 
@@ -461,7 +568,7 @@ vps version
 当前版本信息：
 
 - 项目名：`VPS Pilot`
-- 版本：`v0.0.2`
+- 版本：`v0.0.3-dev`
 - 作者：`markyal`
 
 ---
@@ -477,6 +584,7 @@ vps version
 - [README.md](./README.md)：项目说明
 - [CHANGELOG.md](./CHANGELOG.md)：版本变更记录
 - [ROADMAP.md](./ROADMAP.md)：下一版本开发清单
+- [docs/development-plan.md](./docs/development-plan.md)：开发设计文档
 - [servers.example.conf](./servers.example.conf)：示例配置
 - `servers.conf`：本地实际配置，不纳入仓库
 - [docs/screenshots](./docs/screenshots)：README 截图资源
