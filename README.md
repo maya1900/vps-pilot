@@ -189,12 +189,23 @@ chmod +x "./vps" "./vpsctl"
 ```bash
 mkdir -p "$HOME/.local/bin"
 ln -sfn "$(pwd)/vps" "$HOME/.local/bin/vps"
+ln -sfn "$(pwd)/vpsctl" "$HOME/.local/bin/vpsctl"
 ```
 
 前提：
 
 - `~/.local/bin` 已经在你的 `PATH` 中
 - 如果项目目录被移动了，需要重新建立链接
+
+如果此前已经建立过全局命令，但执行 `vps` 提示找不到命令，或者 `which vps` 没有返回 `~/.local/bin/vps`，通常是软链接已经指向旧目录。可按下面方式重新修复：
+
+```bash
+chmod +x "/absolute/path/to/vps-pilot/vps" "/absolute/path/to/vps-pilot/vpsctl"
+ln -sfn "/absolute/path/to/vps-pilot/vps" "$HOME/.local/bin/vps"
+ln -sfn "/absolute/path/to/vps-pilot/vpsctl" "$HOME/.local/bin/vpsctl"
+hash -r
+vps version
+```
 
 ### Windows
 
