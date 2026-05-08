@@ -103,6 +103,7 @@ by ${APP_AUTHOR}
 常用命令:
   ${APP_CMD} list
   ${APP_CMD} ssh <name>
+  ${APP_CMD} sftp <name>
   ${APP_CMD} code <name> [path]
   ${APP_CMD} backup <name> <path>
   ${APP_CMD} ssh-config sync
@@ -125,6 +126,7 @@ by ${APP_AUTHOR}
 命令说明:
   list              查看服务器列表
   ssh <name>        登录指定服务器
+  sftp <name>       用 Transmit 打开 SFTP 连接
   code <name>       用 VS Code 打开远程目录
   backup <name>     先给远程文件或目录做一份备份
   ssh-config sync   同步 ~/.ssh/config，方便 Remote-SSH 使用
@@ -169,6 +171,7 @@ print_quick_commands() {
   cat <<'EOF'
   list                           查看所有服务器
   ssh <name>                     登录指定服务器
+  sftp <name>                    用 Transmit 打开 SFTP
   code <name> [path]             用 VS Code 打开远程目录
   status [name|all] [--parallel] 查看状态，支持并发
   check [name|all] [--parallel]  做基础巡检，支持并发
@@ -206,6 +209,7 @@ print_menu() {
   [4] update     刷新全部机器的软件源
   [5] upgrade    升级全部机器的软件包
   [6] ssh        登录某一台机器
+  [s] sftp       用 Transmit 打开 SFTP
   [7] batch      进入批量命令会话
   [c] code       用 VS Code 打开远程目录
   [u] run        批量执行命令
@@ -1122,6 +1126,22 @@ ssh_into_server() {
   ssh_args_for_current_server "serial"
 
   exec ssh "${CURRENT_SSH_ARGS[@]}" "${SERVER_USER}@${SERVER_HOST}"
+}
+
+open_transmit_sftp() {
+  local target="$1"
+  local line
+
+  if ! line="$(find_server "${target}")"; then
+    echo "没找到服务器: ${target}"
+    exit 1
+  fi
+
+  parse_server "${line}"
+
+  local sftp_url="sftp://${SERVER_USER}@${SERVER_HOST}:${SERVER_PORT}"
+  echo "正在打开 Transmit: ${SERVER_USER}@${SERVER_HOST}:${SERVER_PORT}"
+  open "${sftp_url}"
 }
 
 copy_key() {
@@ -2098,6 +2118,10 @@ menu() {
         read -r -p "输入服务器名: " target
         ssh_into_server "${target}"
         ;;
+      s|S)
+        read -r -p "输入服务器名: " target
+        open_transmit_sftp "${target}"
+        ;;
       c|C)
         read -r -p "输入服务器名: " target
         read -r -p "输入远程目录（默认当前登录用户家目录，如 root=/root）: " remote_cmd
@@ -2154,6 +2178,9 @@ normalize_cmd() {
       ;;
     code|vscode )
       printf '%s\n' "code"
+      ;;
+    sftp|transmit )
+      printf '%s\n' "sftp"
       ;;
     backup|snapshot )
       printf '%s\n' "backup"
@@ -2233,6 +2260,10 @@ main() {
     code)
       parse_code_args "${@:2}" || exit 1
       open_remote_in_code "${CODE_TARGET}" "${CODE_PATH}"
+      ;;
+    sftp)
+      [[ $# -ge 2 ]] || { echo "用法: vps sftp <name>"; exit 1; }
+      open_transmit_sftp "$2"
       ;;
     backup)
       parse_backup_args "${@:2}" || exit 1

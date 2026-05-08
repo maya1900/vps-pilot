@@ -232,6 +232,7 @@ bash ./vps
 ```bash
 vps list
 vps ssh <name>
+vps sftp <name>
 vps code <name> [path] [--backup]
 vps backup <name> <path>
 vps ssh-config sync
@@ -255,6 +256,7 @@ vps help
 
 - `list`：查看服务器列表
 - `ssh`：登录指定服务器
+- `sftp`：用 Transmit 打开 SFTP 连接
 - `code`：用 VS Code 打开远程目录，可选打开前先备份
 - `backup`：先备份远程文件或目录
 - `ssh-config`：同步本机 `~/.ssh/config`，方便 Remote-SSH 使用
@@ -330,6 +332,12 @@ vps list
 
 ```bash
 vps ssh oc1
+```
+
+### 用 Transmit 打开 SFTP
+
+```bash
+vps sftp oc1
 ```
 
 ### 查看所有服务器状态
