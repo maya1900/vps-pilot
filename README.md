@@ -49,6 +49,7 @@
 
 - 多台 VPS 统一纳管
 - SSH 登录与基础连接封装
+- Transmit SFTP 远程文件管理
 - VS Code Remote-SSH 远程目录打开
 - 批量命令执行与结果汇总
 - 状态查看与基础巡检
@@ -339,6 +340,10 @@ vps ssh oc1
 ```bash
 vps sftp oc1
 ```
+
+执行后会自动调起 Transmit 并打开对应服务器的 SFTP 连接。
+
+支持别名 `vps transmit <name>`。如需指定私钥，请在 Transmit 连接设置中配置。
 
 ### 查看所有服务器状态
 
