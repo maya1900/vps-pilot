@@ -8,7 +8,7 @@
 
 多台 VPS 的本地统一控制工具。
 
-- 版本：`v0.1.0`
+- 版本：`v0.2.0`
 - 作者：`markyal`
 - 主命令：`vps`
 
@@ -117,9 +117,9 @@ cp "./servers.example.conf" "./servers.conf"
 编辑 `servers.conf`，填入你的服务器信息：
 
 ```text
-名称|用户|主机/IP|端口|私钥路径
-oc1|root|192.168.1.10|22|~/.ssh/id_ed25519
-oc2|root|192.168.1.11|22|-
+名称|用户|主机/IP|端口|私钥路径|密码
+oc1|root|192.168.1.10|22|~/.ssh/id_ed25519|
+oc2|root|192.168.1.11|22|-|your_password
 ```
 
 字段说明：
@@ -129,6 +129,9 @@ oc2|root|192.168.1.11|22|-
 - `主机/IP`：公网 IP、内网 IP 或域名
 - `端口`：SSH 端口，默认一般为 `22`
 - `私钥路径`：SSH 私钥路径；若暂时未知，可填写 `-`
+- `密码`：可选；保存后脚本会自动输入密码，交互 SSH 使用 OpenSSH askpass，远程命令使用 `expect`；执行 `copy-key` 成功后会自动清空
+
+旧版 5 段配置仍然兼容。保存密码后请确保 `servers.conf` 不提交到公开仓库。
 
 建议先执行一次配置校验：
 
@@ -232,6 +235,9 @@ bash ./vps
 
 ```bash
 vps list
+vps add [name user host [port] [key] [password]]
+vps del <name> [--yes]
+vps password <name> [password]
 vps ssh <name>
 vps sftp <name>
 vps code <name> [path] [--backup]
@@ -255,7 +261,10 @@ vps help
 
 ### 命令说明
 
-- `list`：查看服务器列表
+- `list`：查看服务器列表和当前配置的登录方式
+- `add`：增加服务器配置；不带参数时进入交互输入
+- `del`：删除服务器配置；默认要求确认，可用 `--yes` 跳过确认
+- `password`：给已有服务器保存或更新登录密码；不传密码时隐藏输入
 - `ssh`：登录指定服务器
 - `sftp`：用 Transmit 打开 SFTP 连接
 - `code`：用 VS Code 打开远程目录，可选打开前先备份
@@ -328,6 +337,36 @@ VPSCTL_CODE_BIN="/Applications/Visual Studio Code.app/Contents/Resources/app/bin
 ```bash
 vps list
 ```
+
+列表里的 `登录` 列来自本地配置：`密钥`、`密码`、`密钥+密码` 或 `默认`。它不再逐台发起 SSH 探测。
+
+### 增加服务器配置
+
+```bash
+vps add
+vps add oc1 root 1.2.3.4
+vps add oc2 ubuntu example.com 2222 ~/.ssh/id_ed25519
+vps add yy1 root 70.39.181.190 28780 - 'your_password'
+```
+
+`port` 默认是 `22`，`key` 默认是 `-`，`password` 默认不保存。只保存密码时，`vps ssh` 会使用 OpenSSH askpass 自动输入密码；`vps run`、`vps status`、`vps check`、`vps copy-key` 等远程命令会使用 `expect` 自动输入密码。`copy-key` 成功后会清空密码，并改用配置里的私钥或默认 `~/.ssh/id_ed25519`。
+
+交互执行 `vps add` 时会立即检查配置名称是否重复；选择密码登录后，可以选择马上写入公钥并改用密钥登录，或者只保存密码。
+
+给已有配置补密码：
+
+```bash
+vps password yy1
+```
+
+### 删除服务器配置
+
+```bash
+vps del oc1
+vps del oc1 --yes
+```
+
+删除只会修改本地 `servers.conf`，不会连接远程主机。
 
 ### 登录某一台服务器
 
@@ -568,6 +607,9 @@ vps
 
 当前已落地的一期能力：
 
+- `add [name user host [port] [key] [password]]`
+- `del <name> [--yes]`
+- `password <name> [password]`
 - `ssh-config sync`
 - `code <name> [path] [--backup]`
 - `backup <name> <path>`
@@ -592,7 +634,7 @@ vps version
 当前版本信息：
 
 - 项目名：`VPS Pilot`
-- 版本：`v0.1.0`
+- 版本：`v0.2.0`
 - 作者：`markyal`
 
 ---

@@ -16,7 +16,7 @@ SCRIPT_DIR="$(resolve_script_dir)"
 CONFIG_FILE="${VPSCTL_CONFIG:-${SCRIPT_DIR}/servers.conf}"
 HISTORY_FILE="${VPSCTL_HISTORY_FILE:-${SCRIPT_DIR}/.vps_batch_history}"
 APP_NAME="VPS Pilot"
-APP_VERSION="v0.1.0"
+APP_VERSION="v0.2.0"
 APP_AUTHOR="markyal"
 APP_CMD="vps"
 APP_DESC="一个用于本机统一管理多台 VPS 的轻量运维工具。"
@@ -102,6 +102,9 @@ by ${APP_AUTHOR}
 
 常用命令:
   ${APP_CMD} list
+  ${APP_CMD} add [name user host [port] [key] [password]]
+  ${APP_CMD} del <name> [--yes]
+  ${APP_CMD} password <name> [password]
   ${APP_CMD} ssh <name>
   ${APP_CMD} sftp <name>
   ${APP_CMD} code <name> [path]
@@ -124,7 +127,10 @@ by ${APP_AUTHOR}
   ${APP_CMD} help
 
 命令说明:
-  list              查看服务器列表
+  list              查看服务器列表和登录方式
+  add               增加服务器配置
+  del               删除服务器配置
+  password          保存或更新服务器密码
   ssh <name>        登录指定服务器
   sftp <name>       用 Transmit 打开 SFTP 连接
   code <name>       用 VS Code 打开远程目录
@@ -169,7 +175,10 @@ print_banner() {
 print_quick_commands() {
   print_section_title "常用命令"
   cat <<'EOF'
-  list                           查看所有服务器
+  list                           查看所有服务器和登录方式
+  add [name user host [port]]    增加服务器配置，可保存密码
+  del <name> [--yes]             删除服务器配置
+  password <name> [password]     保存或更新服务器密码
   ssh <name>                     登录指定服务器
   sftp <name>                    用 Transmit 打开 SFTP
   code <name> [path]             用 VS Code 打开远程目录
@@ -204,6 +213,8 @@ print_menu() {
   print_section_title "操作菜单"
   cat <<'EOF'
   [1] list       查看服务器列表
+  [a] add        增加服务器配置
+  [d] del        删除服务器配置
   [2] status     查看全部机器状态
   [3] check      做一轮基础巡检
   [4] update     刷新全部机器的软件源
@@ -275,18 +286,40 @@ find_server() {
 parse_server() {
   local line="$1"
 
-  IFS='|' read -r SERVER_NAME SERVER_USER SERVER_HOST SERVER_PORT SERVER_KEY <<<"${line}"
+  SERVER_NAME=""
+  SERVER_USER=""
+  SERVER_HOST=""
+  SERVER_PORT=""
+  SERVER_KEY=""
+  SERVER_PASSWORD=""
+
+  IFS='|' read -r SERVER_NAME SERVER_USER SERVER_HOST SERVER_PORT SERVER_KEY SERVER_PASSWORD <<<"${line}"
   SERVER_NAME="$(trim "${SERVER_NAME}")"
   SERVER_USER="$(trim "${SERVER_USER}")"
   SERVER_HOST="$(trim "${SERVER_HOST}")"
   SERVER_PORT="$(trim "${SERVER_PORT}")"
   SERVER_KEY="$(trim "${SERVER_KEY}")"
+  SERVER_PASSWORD="$(trim "${SERVER_PASSWORD:-}")"
 
   SERVER_PORT="${SERVER_PORT:-22}"
   SERVER_KEY="${SERVER_KEY:--}"
   if [[ "${SERVER_KEY}" != "-" ]]; then
     SERVER_KEY="$(expand_home "${SERVER_KEY}")"
   fi
+}
+
+server_has_password() {
+  [[ -n "${SERVER_PASSWORD:-}" && "${SERVER_PASSWORD}" != "-" ]]
+}
+
+expect_escape() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\$/\\\$}"
+  value="${value//\"/\\\"}"
+  value="${value//[/\\[}"
+  value="${value//]/\\]}"
+  printf '%s' "${value}"
 }
 
 ssh_args_for_current_server() {
@@ -307,6 +340,95 @@ ssh_args_for_current_server() {
   fi
 }
 
+run_expect_password_ssh() {
+  local remote_cmd="${1:-}"
+  local password
+  password="$(expect_escape "${SERVER_PASSWORD}")"
+
+  expect -f - -- "${CURRENT_SSH_ARGS[@]}" "${SERVER_USER}@${SERVER_HOST}" ${remote_cmd:+"${remote_cmd}"} <<EOF
+set timeout -1
+set password "${password}"
+set command [list ssh {*}\$argv]
+set sent_password 0
+log_user 0
+spawn {*}\$command
+expect {
+  -re "(?i)are you sure you want to continue connecting" {
+    send "yes\r"
+    exp_continue
+  }
+  -re "(?i)password:" {
+    send -- "\$password\r"
+    if {\$sent_password == 0} {
+      set sent_password 1
+      log_user 1
+    }
+    exp_continue
+  }
+  eof
+}
+catch wait result
+exit [lindex \$result 3]
+EOF
+}
+
+run_askpass_password_ssh_interactive() {
+  local askpass_dir askpass_file password_file ssh_status
+
+  askpass_dir="$(mktemp -d "${TMPDIR:-/tmp}/vps-pilot-askpass.XXXXXX")"
+  askpass_file="${askpass_dir}/askpass"
+  password_file="${askpass_dir}/password"
+
+  chmod 700 "${askpass_dir}"
+  printf '%s' "${SERVER_PASSWORD}" > "${password_file}"
+  chmod 600 "${password_file}"
+  cat > "${askpass_file}" <<'EOF'
+#!/usr/bin/env bash
+cat "${VPS_PILOT_ASKPASS_PASSWORD_FILE}"
+EOF
+  chmod 700 "${askpass_file}"
+
+  set +e
+  DISPLAY="${DISPLAY:-vps-pilot}" \
+    SSH_ASKPASS="${askpass_file}" \
+    SSH_ASKPASS_REQUIRE=force \
+    VPS_PILOT_ASKPASS_PASSWORD_FILE="${password_file}" \
+    ssh -tt "${CURRENT_SSH_ARGS[@]}" "${SERVER_USER}@${SERVER_HOST}"
+  ssh_status=$?
+  set -e
+
+  rm -rf "${askpass_dir}"
+  return "${ssh_status}"
+}
+
+run_ssh_for_current_server() {
+  local mode="${1:-serial}"
+  local remote_cmd="${2:-}"
+  local -a auth_args=()
+
+  if server_has_password && [[ "${mode}" == "parallel" && "${SERVER_KEY}" == "-" ]]; then
+    echo "密码登录不支持并发模式，请先执行 copy-key 写入公钥。"
+    return 1
+  fi
+
+  if server_has_password && [[ "${mode}" != "parallel" ]]; then
+    if ! command -v expect >/dev/null 2>&1; then
+      echo "当前配置只有密码可用，但系统缺少 expect，无法自动输入密码。"
+      return 1
+    fi
+    auth_args=(-o PreferredAuthentications=publickey,password,keyboard-interactive -o NumberOfPasswordPrompts=1)
+    CURRENT_SSH_ARGS+=("${auth_args[@]}")
+    run_expect_password_ssh "${remote_cmd}"
+    return $?
+  fi
+
+  if [[ -n "${remote_cmd}" ]]; then
+    ssh "${CURRENT_SSH_ARGS[@]}" "${SERVER_USER}@${SERVER_HOST}" "${remote_cmd}"
+  else
+    ssh "${CURRENT_SSH_ARGS[@]}" "${SERVER_USER}@${SERVER_HOST}"
+  fi
+}
+
 run_remote_command() {
   local line="$1"
   local remote_cmd="$2"
@@ -319,7 +441,7 @@ run_remote_command() {
   print_rule
   printf '%s %s %s\n' "$(style_text "${STYLE_LABEL}" ">>>")" "$(style_text "${STYLE_VALUE}" "${SERVER_NAME}")" "$(style_text "${STYLE_MUTED}" "(${SERVER_USER}@${SERVER_HOST})")"
   set +e
-  ssh "${CURRENT_SSH_ARGS[@]}" "${SERVER_USER}@${SERVER_HOST}" "${remote_cmd}"
+  run_ssh_for_current_server "${mode}" "${remote_cmd}"
   ssh_status=$?
   set -e
   if [[ ${ssh_status} -eq 0 ]]; then
@@ -340,7 +462,7 @@ capture_remote_command() {
   ssh_args_for_current_server "${mode}"
 
   set +e
-  CAPTURED_REMOTE_OUTPUT="$(ssh "${CURRENT_SSH_ARGS[@]}" "${SERVER_USER}@${SERVER_HOST}" "${remote_cmd}" 2>&1)"
+  CAPTURED_REMOTE_OUTPUT="$(run_ssh_for_current_server "${mode}" "${remote_cmd}" 2>&1)"
   CAPTURED_REMOTE_STATUS=$?
   set -e
 }
@@ -356,25 +478,39 @@ each_server() {
 }
 
 list_servers() {
-  local line
+  local line login_method
 
   print_banner
   echo
   print_section_title "服务器列表"
-  printf '%-12s %-12s %-24s %-6s %s\n' \
+  printf '%-12s %-12s %-24s %-6s %-8s %s\n' \
     "$(style_text "${STYLE_ACCENT}" "名称")" \
     "$(style_text "${STYLE_ACCENT}" "用户")" \
     "$(style_text "${STYLE_ACCENT}" "主机")" \
     "$(style_text "${STYLE_ACCENT}" "端口")" \
+    "$(style_text "${STYLE_ACCENT}" "登录")" \
     "$(style_text "${STYLE_ACCENT}" "密钥")"
   print_rule
   while IFS= read -r line || [[ -n "${line}" ]]; do
     line="$(trim "${line}")"
     [[ -z "${line}" || "${line}" == \#* ]] && continue
     parse_server "${line}"
-    printf '%-12s %-12s %-24s %-6s %s\n' \
-      "${SERVER_NAME}" "${SERVER_USER}" "${SERVER_HOST}" "${SERVER_PORT}" "${SERVER_KEY}"
+    login_method="$(login_method_for_current_server)"
+    printf '%-12s %-12s %-24s %-6s %-8s %s\n' \
+      "${SERVER_NAME}" "${SERVER_USER}" "${SERVER_HOST}" "${SERVER_PORT}" "${login_method}" "${SERVER_KEY}"
   done < "${CONFIG_FILE}"
+}
+
+login_method_for_current_server() {
+  if [[ "${SERVER_KEY}" != "-" ]] && server_has_password; then
+    printf '%s' "密钥+密码"
+  elif [[ "${SERVER_KEY}" != "-" ]]; then
+    printf '%s' "密钥"
+  elif server_has_password; then
+    printf '%s' "密码"
+  else
+    printf '%s' "默认"
+  fi
 }
 
 join_by_comma() {
@@ -907,6 +1043,476 @@ parse_containers_args() {
   fi
 }
 
+print_add_usage() {
+  cat <<EOF
+用法:
+  vps add
+  vps add <name> <user> <host> [port] [key] [password]
+
+示例:
+  vps add oc1 root 1.2.3.4
+  vps add oc2 ubuntu example.com 2222 ~/.ssh/id_ed25519
+  vps add yy1 root 70.39.181.190 28780 - 'your_password'
+
+说明:
+  port 默认 22
+  key 默认 -，表示使用 ssh 默认密钥
+  password 默认空；保存后可自动密码登录，copy-key 成功后会清空密码
+EOF
+}
+
+print_del_usage() {
+  cat <<EOF
+用法:
+  vps del <name> [--yes]
+
+示例:
+  vps del oc1
+  vps del oc1 --yes
+EOF
+}
+
+print_password_usage() {
+  cat <<EOF
+用法:
+  vps password <name>
+  vps password <name> <password>
+
+说明:
+  不传 password 时会隐藏输入。
+  执行 copy-key 成功后会自动清空保存的密码。
+EOF
+}
+
+make_config_temp_file() {
+  local config_dir
+  config_dir="$(dirname "${CONFIG_FILE}")"
+  mkdir -p "${config_dir}"
+  mktemp "${config_dir}/.vps-pilot-config.XXXXXX"
+}
+
+validate_config_name() {
+  local value="$1"
+
+  if [[ -z "${value}" ]]; then
+    echo "服务器名称不能为空。"
+    return 1
+  fi
+  if [[ "${value}" == "all" ]]; then
+    echo "all 是批量目标保留字，别拿它当服务器名。"
+    return 1
+  fi
+  if ! [[ "${value}" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    echo "服务器名称只能包含字母、数字、点、下划线和横线: ${value}"
+    return 1
+  fi
+}
+
+validate_config_plain_field() {
+  local label="$1"
+  local value="$2"
+
+  if [[ -z "${value}" ]]; then
+    echo "${label}不能为空。"
+    return 1
+  fi
+  if [[ "${value}" == *"|"* || "${value}" == *$'\n'* || "${value}" == *$'\r'* ]]; then
+    echo "${label}不能包含 | 或换行。"
+    return 1
+  fi
+  if [[ "${value}" =~ [[:space:]] ]]; then
+    echo "${label}不能包含空白字符: ${value}"
+    return 1
+  fi
+}
+
+validate_config_key() {
+  local value="$1"
+  local expanded_key
+
+  if [[ -z "${value}" ]]; then
+    echo "私钥路径不能为空，没指定就用 -。"
+    return 1
+  fi
+  if [[ "${value}" == *"|"* || "${value}" == *$'\n'* || "${value}" == *$'\r'* ]]; then
+    echo "私钥路径不能包含 | 或换行。"
+    return 1
+  fi
+  if [[ "${value}" != "-" ]]; then
+    expanded_key="$(expand_home "${value}")"
+    if [[ ! -f "${expanded_key}" ]]; then
+      echo "私钥文件不存在: ${expanded_key}"
+      return 1
+    fi
+  fi
+}
+
+validate_config_password() {
+  local value="$1"
+
+  if [[ "${value}" == *"|"* || "${value}" == *$'\n'* || "${value}" == *$'\r'* ]]; then
+    echo "密码不能包含 | 或换行。"
+    return 1
+  fi
+}
+
+server_name_exists() {
+  local name="$1"
+
+  [[ -f "${CONFIG_FILE}" ]] || return 1
+  find_server "${name}" >/dev/null
+}
+
+validate_add_config_fields() {
+  ADD_NAME="$(trim "${ADD_NAME}")"
+  ADD_USER="$(trim "${ADD_USER}")"
+  ADD_HOST="$(trim "${ADD_HOST}")"
+  ADD_PORT="$(trim "${ADD_PORT:-22}")"
+  ADD_KEY="$(trim "${ADD_KEY:--}")"
+  ADD_PASSWORD="$(trim "${ADD_PASSWORD:-}")"
+
+  validate_config_name "${ADD_NAME}" || return 1
+  validate_config_plain_field "登录用户" "${ADD_USER}" || return 1
+  validate_config_plain_field "主机/IP" "${ADD_HOST}" || return 1
+  if ! [[ "${ADD_PORT}" =~ ^[0-9]+$ ]] || (( ADD_PORT < 1 || ADD_PORT > 65535 )); then
+    echo "端口不合法: ${ADD_PORT}"
+    return 1
+  fi
+  validate_config_key "${ADD_KEY}" || return 1
+  validate_config_password "${ADD_PASSWORD}" || return 1
+}
+
+prompt_add_config_fields() {
+  local auth_choice save_key_choice
+
+  while true; do
+    read -r -p "配置名称: " ADD_NAME
+    ADD_NAME="$(trim "${ADD_NAME}")"
+    validate_config_name "${ADD_NAME}" || continue
+    if server_name_exists "${ADD_NAME}"; then
+      echo "配置名称已存在: ${ADD_NAME}，换一个。"
+      continue
+    fi
+    break
+  done
+
+  read -r -p "登录用户 [root]: " ADD_USER
+  ADD_USER="${ADD_USER:-root}"
+  read -r -p "主机/IP: " ADD_HOST
+  read -r -p "端口 [22]: " ADD_PORT
+  ADD_PORT="${ADD_PORT:-22}"
+
+  while true; do
+    read -r -p "认证方式：1) 密码  2) 密钥路径 [1]: " auth_choice
+    auth_choice="${auth_choice:-1}"
+    case "${auth_choice}" in
+      1|p|P|password|密码)
+        ADD_KEY="-"
+        while true; do
+          read -r -s -p "登录密码: " ADD_PASSWORD
+          echo
+          ADD_PASSWORD="$(trim "${ADD_PASSWORD}")"
+          [[ -n "${ADD_PASSWORD}" ]] && break
+          echo "密码不能为空。"
+        done
+        read -r -p "是否立即写入公钥并改用密钥登录？[y/N]: " save_key_choice
+        case "${save_key_choice}" in
+          y|Y|yes|YES|是)
+            ADD_COPY_KEY_AFTER_SAVE=1
+            ;;
+          *)
+            ADD_COPY_KEY_AFTER_SAVE=0
+            ;;
+        esac
+        break
+        ;;
+      2|k|K|key|密钥)
+        read -r -p "私钥路径 [-]: " ADD_KEY
+        ADD_KEY="${ADD_KEY:--}"
+        ADD_PASSWORD=""
+        ADD_COPY_KEY_AFTER_SAVE=0
+        break
+        ;;
+      *)
+        echo "请输入 1 或 2。"
+        ;;
+    esac
+  done
+}
+
+parse_add_args() {
+  ADD_NAME=""
+  ADD_USER=""
+  ADD_HOST=""
+  ADD_PORT="22"
+  ADD_KEY="-"
+  ADD_PASSWORD=""
+  ADD_INTERACTIVE=0
+  ADD_COPY_KEY_AFTER_SAVE=0
+
+  if [[ $# -eq 1 && ( "${1:-}" == "--help" || "${1:-}" == "-h" ) ]]; then
+    print_add_usage
+    return 1
+  fi
+
+  if [[ $# -eq 0 ]]; then
+    if [[ -t 0 && -t 1 ]]; then
+      ADD_INTERACTIVE=1
+      prompt_add_config_fields
+    else
+      print_add_usage
+      return 1
+    fi
+  elif [[ $# -ge 3 && $# -le 6 ]]; then
+    ADD_NAME="$1"
+    ADD_USER="$2"
+    ADD_HOST="$3"
+    ADD_PORT="${4:-22}"
+    ADD_KEY="${5:--}"
+    ADD_PASSWORD="${6:-}"
+  else
+    print_add_usage
+    return 1
+  fi
+
+  validate_add_config_fields
+}
+
+parse_del_args() {
+  DEL_NAME=""
+  DEL_YES=0
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --yes|-y)
+        DEL_YES=1
+        ;;
+      --help|-h)
+        print_del_usage
+        return 1
+        ;;
+      *)
+        if [[ -n "${DEL_NAME}" ]]; then
+          echo "del 参数写多了: $1"
+          print_del_usage
+          return 1
+        fi
+        DEL_NAME="$1"
+        ;;
+    esac
+    shift
+  done
+
+  if [[ -z "${DEL_NAME}" ]]; then
+    if [[ -t 0 && -t 1 ]]; then
+      read -r -p "要删除的配置名称: " DEL_NAME
+    else
+      print_del_usage
+      return 1
+    fi
+  fi
+
+  DEL_NAME="$(trim "${DEL_NAME}")"
+  validate_config_name "${DEL_NAME}"
+}
+
+parse_password_args() {
+  PASSWORD_TARGET=""
+  PASSWORD_VALUE=""
+
+  if [[ $# -eq 1 && ( "${1:-}" == "--help" || "${1:-}" == "-h" ) ]]; then
+    print_password_usage
+    return 1
+  fi
+
+  if [[ $# -lt 1 || $# -gt 2 ]]; then
+    print_password_usage
+    return 1
+  fi
+
+  PASSWORD_TARGET="$(trim "$1")"
+  validate_config_name "${PASSWORD_TARGET}" || return 1
+
+  if [[ $# -eq 2 ]]; then
+    PASSWORD_VALUE="$2"
+  else
+    if [[ -t 0 && -t 1 ]]; then
+      read -r -s -p "输入 ${PASSWORD_TARGET} 的登录密码: " PASSWORD_VALUE
+      echo
+    else
+      print_password_usage
+      return 1
+    fi
+  fi
+
+  PASSWORD_VALUE="$(trim "${PASSWORD_VALUE}")"
+  if [[ -z "${PASSWORD_VALUE}" ]]; then
+    echo "密码不能为空。"
+    return 1
+  fi
+  validate_config_password "${PASSWORD_VALUE}" || return 1
+}
+
+save_server_password() {
+  local target="$1"
+  local password="$2"
+  local line
+
+  if ! line="$(find_server "${target}")"; then
+    echo "没找到服务器: ${target}"
+    return 1
+  fi
+
+  parse_server "${line}"
+  update_server_auth_config "${SERVER_NAME}" "${SERVER_KEY}" "${password}"
+  echo "已保存 ${SERVER_NAME} 的密码。执行 copy-key 成功后会自动移除这段密码。"
+}
+
+add_server_config() {
+  local new_line
+  local temp_file
+
+  if [[ -f "${CONFIG_FILE}" ]] && find_server "${ADD_NAME}" >/dev/null; then
+    echo "服务器配置已存在: ${ADD_NAME}"
+    return 1
+  fi
+
+  temp_file="$(make_config_temp_file)"
+  if [[ -f "${CONFIG_FILE}" ]]; then
+    awk '{print}' "${CONFIG_FILE}" > "${temp_file}"
+  else
+    cat > "${temp_file}" <<'EOF'
+# 每一行一台服务器，格式如下：
+# 名称|用户|主机/IP|端口|私钥路径|密码
+#
+# 私钥路径如果暂时不知道，就先写 -
+EOF
+  fi
+
+  new_line="${ADD_NAME}|${ADD_USER}|${ADD_HOST}|${ADD_PORT}|${ADD_KEY}|${ADD_PASSWORD}"
+  printf '%s\n' "${new_line}" >> "${temp_file}"
+  mv "${temp_file}" "${CONFIG_FILE}"
+  chmod 600 "${CONFIG_FILE}" 2>/dev/null || true
+
+  echo "已增加服务器配置: ${ADD_NAME} (${ADD_USER}@${ADD_HOST}:${ADD_PORT})"
+  echo "配置文件: ${CONFIG_FILE}"
+}
+
+post_add_copy_key_if_requested() {
+  if [[ "${ADD_COPY_KEY_AFTER_SAVE:-0}" != "1" ]]; then
+    return 0
+  fi
+
+  echo "开始写入公钥，成功后会自动移除保存的密码。"
+  if copy_key "${ADD_NAME}"; then
+    return 0
+  fi
+
+  echo "公钥写入失败，已保留密码配置，可稍后执行: vps copy-key ${ADD_NAME}"
+  return 1
+}
+
+confirm_delete_config() {
+  local target="$1"
+  local confirm
+
+  read -r -p "确认删除 ${target} 的配置？输入 YES 继续: " confirm
+  if [[ "${confirm}" != "YES" ]]; then
+    echo "已取消。"
+    return 1
+  fi
+}
+
+delete_server_config() {
+  local target="$1"
+  local skip_confirm="${2:-0}"
+  local line raw name
+  local temp_file
+  local removed=0
+
+  if ! line="$(find_server "${target}")"; then
+    echo "没找到服务器: ${target}"
+    return 1
+  fi
+
+  parse_server "${line}"
+  printf '%s %s %s\n' "$(style_text "${STYLE_WARN}" "将删除配置:")" "$(style_text "${STYLE_VALUE}" "${SERVER_NAME}")" "$(style_text "${STYLE_MUTED}" "${SERVER_USER}@${SERVER_HOST}:${SERVER_PORT}")"
+
+  if [[ "${skip_confirm}" != "1" ]]; then
+    confirm_delete_config "${target}" || return 1
+  fi
+
+  temp_file="$(make_config_temp_file)"
+  while IFS= read -r raw || [[ -n "${raw}" ]]; do
+    line="$(trim "${raw}")"
+    if [[ -z "${line}" || "${line}" == \#* ]]; then
+      printf '%s\n' "${raw}" >> "${temp_file}"
+      continue
+    fi
+
+    IFS='|' read -r name _rest <<<"${line}"
+    name="$(trim "${name}")"
+    if [[ "${name}" == "${target}" ]]; then
+      removed=1
+      continue
+    fi
+
+    printf '%s\n' "${raw}" >> "${temp_file}"
+  done < "${CONFIG_FILE}"
+
+  if [[ "${removed}" -ne 1 ]]; then
+    rm -f "${temp_file}"
+    echo "删除失败，配置没有变更。"
+    return 1
+  fi
+
+  mv "${temp_file}" "${CONFIG_FILE}"
+  chmod 600 "${CONFIG_FILE}" 2>/dev/null || true
+  echo "已删除服务器配置: ${target}"
+}
+
+update_server_auth_config() {
+  local target="$1"
+  local next_key="$2"
+  local next_password="$3"
+  local raw line name user host port key password
+  local temp_file
+  local updated=0
+
+  temp_file="$(make_config_temp_file)"
+  while IFS= read -r raw || [[ -n "${raw}" ]]; do
+    line="$(trim "${raw}")"
+    if [[ -z "${line}" || "${line}" == \#* ]]; then
+      printf '%s\n' "${raw}" >> "${temp_file}"
+      continue
+    fi
+
+    IFS='|' read -r name user host port key password <<<"${line}"
+    name="$(trim "${name}")"
+    if [[ "${name}" == "${target}" ]]; then
+      user="$(trim "${user}")"
+      host="$(trim "${host}")"
+      port="$(trim "${port:-22}")"
+      key="$(trim "${next_key}")"
+      password="$(trim "${next_password}")"
+      printf '%s|%s|%s|%s|%s|%s\n' "${name}" "${user}" "${host}" "${port}" "${key}" "${password}" >> "${temp_file}"
+      updated=1
+      continue
+    fi
+
+    printf '%s\n' "${raw}" >> "${temp_file}"
+  done < "${CONFIG_FILE}"
+
+  if [[ "${updated}" -ne 1 ]]; then
+    rm -f "${temp_file}"
+    echo "更新配置失败，没找到服务器: ${target}"
+    return 1
+  fi
+
+  mv "${temp_file}" "${CONFIG_FILE}"
+  chmod 600 "${CONFIG_FILE}" 2>/dev/null || true
+}
+
 list_containers_command() {
   cat <<'EOF'
 docker ps -a --format '{{.Names}}|{{.Image}}|{{.Status}}'
@@ -1125,6 +1731,13 @@ ssh_into_server() {
   parse_server "${line}"
   ssh_args_for_current_server "serial"
 
+  if server_has_password; then
+    echo "正在用保存的密码登录 ${SERVER_NAME}..."
+    CURRENT_SSH_ARGS+=(-o PreferredAuthentications=publickey,password,keyboard-interactive -o NumberOfPasswordPrompts=1)
+    run_askpass_password_ssh_interactive
+    exit $?
+  fi
+
   exec ssh "${CURRENT_SSH_ARGS[@]}" "${SERVER_USER}@${SERVER_HOST}"
 }
 
@@ -1144,16 +1757,22 @@ open_transmit_sftp() {
   open "${sftp_url}"
 }
 
+copy_remote_pubkey_with_password() {
+  local pubkey="$1"
+  local pubkey_line quoted_pubkey remote_cmd
+
+  pubkey_line="$(tr -d '\r\n' < "${pubkey}")"
+  quoted_pubkey="$(quote_for_single_shell "${pubkey_line}")"
+  remote_cmd="umask 077 && mkdir -p ~/.ssh && touch ~/.ssh/authorized_keys && printf '%s\n' ${quoted_pubkey} > ~/.ssh/vps_tmp_key && (grep -qxFf ~/.ssh/vps_tmp_key ~/.ssh/authorized_keys || cat ~/.ssh/vps_tmp_key >> ~/.ssh/authorized_keys) && rm -f ~/.ssh/vps_tmp_key"
+  run_ssh_for_current_server "serial" "${remote_cmd}"
+}
+
 copy_key() {
   local target="$1"
-  local pubkey="${HOME}/.ssh/id_ed25519.pub"
+  local pubkey
+  local key_file
   local line
-
-  if [[ ! -f "${pubkey}" ]]; then
-    echo "没找到公钥: ${pubkey}"
-    echo "先执行: ssh-keygen -t ed25519"
-    exit 1
-  fi
+  local copy_status
 
   if ! line="$(find_server "${target}")"; then
     echo "没找到服务器: ${target}"
@@ -1161,11 +1780,43 @@ copy_key() {
   fi
 
   parse_server "${line}"
+  if [[ "${SERVER_KEY}" != "-" ]]; then
+    key_file="${SERVER_KEY}"
+  else
+    key_file="${HOME}/.ssh/id_ed25519"
+  fi
+  pubkey="${key_file}.pub"
+
+  if [[ ! -f "${key_file}" ]]; then
+    echo "没找到私钥: ${key_file}"
+    echo "先执行: ssh-keygen -t ed25519"
+    exit 1
+  fi
+  if [[ ! -f "${pubkey}" ]]; then
+    echo "没找到公钥: ${pubkey}"
+    echo "可执行: ssh-keygen -y -f \"${key_file}\" > \"${pubkey}\""
+    exit 1
+  fi
+
   ssh_args_for_current_server "serial"
-  ssh "${CURRENT_SSH_ARGS[@]}" "${SERVER_USER}@${SERVER_HOST}" \
-    "umask 077 && mkdir -p ~/.ssh && touch ~/.ssh/authorized_keys && cat > ~/.ssh/vps_tmp_key && (grep -qxFf ~/.ssh/vps_tmp_key ~/.ssh/authorized_keys || cat ~/.ssh/vps_tmp_key >> ~/.ssh/authorized_keys) && rm -f ~/.ssh/vps_tmp_key" \
-    < "${pubkey}"
-  echo "公钥已写入 ${SERVER_NAME}"
+  set +e
+  if server_has_password; then
+    copy_remote_pubkey_with_password "${pubkey}"
+  else
+    ssh "${CURRENT_SSH_ARGS[@]}" "${SERVER_USER}@${SERVER_HOST}" \
+      "umask 077 && mkdir -p ~/.ssh && touch ~/.ssh/authorized_keys && cat > ~/.ssh/vps_tmp_key && (grep -qxFf ~/.ssh/vps_tmp_key ~/.ssh/authorized_keys || cat ~/.ssh/vps_tmp_key >> ~/.ssh/authorized_keys) && rm -f ~/.ssh/vps_tmp_key" \
+      < "${pubkey}"
+  fi
+  copy_status=$?
+  set -e
+
+  if [[ ${copy_status} -ne 0 ]]; then
+    echo "公钥写入失败: ${SERVER_NAME}"
+    return "${copy_status}"
+  fi
+
+  update_server_auth_config "${SERVER_NAME}" "${key_file}" ""
+  echo "公钥已写入 ${SERVER_NAME}，已移除保存的密码并改用密钥: ${key_file}"
 }
 
 build_managed_ssh_config_block() {
@@ -1738,8 +2389,8 @@ validate_config() {
     [[ -z "${line}" || "${line}" == \#* ]] && continue
 
     field_count="$(awk -F'|' '{print NF}' <<<"${line}")"
-    if [[ "${field_count}" -ne 5 ]]; then
-      echo "第 ${lineno} 行字段数量不对，应该是 5 段。"
+    if [[ "${field_count}" -ne 5 && "${field_count}" -ne 6 ]]; then
+      echo "第 ${lineno} 行字段数量不对，应该是 5 或 6 段。"
       errors=$((errors + 1))
       continue
     fi
@@ -1758,6 +2409,11 @@ validate_config() {
 
     if [[ "${SERVER_KEY}" != "-" && ! -f "${SERVER_KEY}" ]]; then
       echo "第 ${lineno} 行私钥文件不存在: ${SERVER_KEY}"
+      errors=$((errors + 1))
+    fi
+
+    if ! validate_config_password "${SERVER_PASSWORD}" >/dev/null; then
+      echo "第 ${lineno} 行密码字段不合法，不能包含 | 或换行。"
       errors=$((errors + 1))
     fi
 
@@ -2102,6 +2758,15 @@ menu() {
       1)
         list_servers
         ;;
+      a|A)
+        prompt_add_config_fields
+        validate_add_config_fields && add_server_config
+        ;;
+      d|D)
+        read -r -p "输入要删除的服务器名: " target
+        target="$(trim "${target}")"
+        validate_config_name "${target}" && delete_server_config "${target}" "0"
+        ;;
       2)
         run_for_target "all" "$(status_remote_script)" "serial"
         ;;
@@ -2173,6 +2838,15 @@ normalize_cmd() {
     list|ls )
       printf '%s\n' "list"
       ;;
+    add|new )
+      printf '%s\n' "add"
+      ;;
+    del|delete|remove|rm )
+      printf '%s\n' "del"
+      ;;
+    password|passwd|pass )
+      printf '%s\n' "password"
+      ;;
     ssh|login )
       printf '%s\n' "ssh"
       ;;
@@ -2221,7 +2895,7 @@ normalize_cmd() {
     reboot )
       printf '%s\n' "reboot"
       ;;
-    copy-key|copykey )
+    copy-key|copykey|copy-k|copyk )
       printf '%s\n' "copy-key"
       ;;
     validate )
@@ -2243,15 +2917,48 @@ normalize_cmd() {
 }
 
 main() {
-  ensure_config
-
   local original_cmd="${1:-}"
   local cmd
   cmd="$(normalize_cmd "${original_cmd}")"
 
+  if [[ "${cmd}" == "add" || "${cmd}" == "help" || "${cmd}" == "version" ]]; then
+    :
+  elif [[ "${cmd}" == "del" && ( "${2:-}" == "--help" || "${2:-}" == "-h" ) ]]; then
+    :
+  elif [[ "${cmd}" == "password" && ( "${2:-}" == "--help" || "${2:-}" == "-h" ) ]]; then
+    :
+  else
+    ensure_config
+  fi
+
   case "${cmd}" in
     list)
       list_servers
+      ;;
+    add)
+      if [[ "${2:-}" == "--help" || "${2:-}" == "-h" ]]; then
+        print_add_usage
+        exit 0
+      fi
+      parse_add_args "${@:2}" || exit 1
+      add_server_config
+      post_add_copy_key_if_requested
+      ;;
+    del)
+      if [[ "${2:-}" == "--help" || "${2:-}" == "-h" ]]; then
+        print_del_usage
+        exit 0
+      fi
+      parse_del_args "${@:2}" || exit 1
+      delete_server_config "${DEL_NAME}" "${DEL_YES}"
+      ;;
+    password)
+      if [[ "${2:-}" == "--help" || "${2:-}" == "-h" ]]; then
+        print_password_usage
+        exit 0
+      fi
+      parse_password_args "${@:2}" || exit 1
+      save_server_password "${PASSWORD_TARGET}" "${PASSWORD_VALUE}"
       ;;
     ssh)
       [[ $# -ge 2 ]] || { echo "用法: vps ssh <name>"; exit 1; }

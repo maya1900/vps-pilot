@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-05-13
+
+### Added
+
+- Added `add` and `del` commands for managing local server configuration entries.
+- Added optional password storage for server entries, with automatic password login and password cleanup after `copy-key`.
+- Added `password <name> [password]` for updating an existing server password.
+- Added a config-based login method column to `list`.
+- Improved interactive `add` to reject duplicate names immediately and optionally convert a password login to key login.
+
 ## [0.1.0] - 2026-04-21
 
 ### Added
