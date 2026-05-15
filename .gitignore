@@ -1,3 +1,12 @@
+# Local machine artifacts
 .DS_Store
 .vps_batch_history
+.claude/settings.local.json
+.spec-workflow/
 servers.conf
+
+# Temporary files
+*.bak
+*.log
+*.swp
+*.tmp

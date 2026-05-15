@@ -3,35 +3,47 @@
 [![Release](https://img.shields.io/github/v/release/maya1900/vps-pilot?display_name=tag)](https://github.com/maya1900/vps-pilot/releases)
 [![License](https://img.shields.io/github/license/maya1900/vps-pilot)](./LICENSE)
 [![Stars](https://img.shields.io/github/stars/maya1900/vps-pilot?style=flat)](https://github.com/maya1900/vps-pilot/stargazers)
-[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-2563eb)](./README.md)
 [![Shell](https://img.shields.io/badge/shell-bash-121011?logo=gnu-bash)](./vps)
 
-多台 VPS 的本地统一控制工具。
+VPS Pilot 是一个本地命令行工具，用来在一台电脑上统一管理多台 VPS。
 
-- 版本：`v0.2.0`
+它的核心目标很简单：把常用的 SSH 登录、批量命令、状态查看、基础巡检、Docker 容器查看、容器内命令会话、VS Code Remote-SSH 打开目录等操作收进一个 `vps` 命令里。
+
+- 当前版本：`v0.2.0`
 - 作者：`markyal`
-- 主命令：`vps`
-
-`VPS Pilot` 面向需要在本机统一管理多台 VPS 的场景，提供服务器列表管理、批量命令执行、基础巡检、容器查看、容器内批量命令会话等能力。项目以单文件脚本为核心，尽量降低依赖，适合个人运维、小规模节点管理和日常巡检使用。
-
----
-
-## 项目说明
-
-本项目定位为本地命令行工具，主要解决以下问题：
-
-- 统一管理多台 VPS 的连接信息
-- 通过一个入口完成登录、巡检、批量执行、容器查看等常见操作
-- 减少重复输入长 SSH 命令与 Docker 命令的负担
-- 提供适合中文使用习惯的交互提示与菜单入口
-
-本项目默认运行在本地终端环境，所有操作均基于 SSH 到目标主机执行，请在确认目标主机、用户和权限配置正确后使用。
+- 主入口：`vps`
+- 兼容入口：`vpsctl`
 
 ---
 
-## 界面截图
+## 功能范围
 
-以下截图为项目当前命令行交互示意：
+当前项目已经支持：
+
+- 本地维护服务器配置：`list`、`add`、`del`、`password`、`validate`
+- SSH 登录：`ssh <name>`
+- SFTP 打开：`sftp <name>`，通过 Transmit 打开连接
+- SSH 配置同步：`ssh-config sync` / `ssh-config show`
+- VS Code Remote-SSH 打开远程目录：`code <name> [path]`
+- 远程文件或目录备份：`backup <name> <path>`
+- 单台或多台执行命令：`run <name|all> [--parallel] -- <command>`
+- 状态查看：`status [name|all] [--parallel]`
+- 基础巡检：`check [name|all] [--parallel]`
+- 系统包刷新与升级：`update`、`upgrade`
+- 主机重启：`reboot`
+- SSH 公钥分发：`copy-key <name>`
+- 批量命令会话：`batch <name|all> [--parallel]`
+- Docker 容器列表：`containers <name>`，别名 `docker <name>`
+- 容器内批量命令会话：`cbatch <name> [container]`
+- 诊断信息采集和规则分析：`doctor <name> [subject]`
+- 可选 OpenAI 兼容接口 AI 分析：通过环境变量开启
+- 交互菜单：直接执行 `vps` 或 `vps menu`
+
+项目没有内置 Web 面板、远程目录挂载、插件系统、分组标签、巡检报告导出、对话式运维助手等能力。相关想法如果存在，只属于规划文档，不代表当前版本可用。
+
+---
+
+## 截图
 
 ### 主菜单
 
@@ -43,152 +55,85 @@
 
 ---
 
-## 主要特性
+## 环境要求
 
-### 核心能力
+本机需要：
 
-- 多台 VPS 统一纳管
-- SSH 登录与基础连接封装
-- Transmit SFTP 远程文件管理
-- VS Code Remote-SSH 远程目录打开
-- 批量命令执行与结果汇总
-- 状态查看与基础巡检
-- 报错上下文采集与诊断分析
-- 容器列表查看
-- 容器内批量命令会话
+- Bash
+- OpenSSH 客户端：`ssh`
+- 可选：`expect`，用于保存密码后的自动输入
+- 可选：`curl` 和 `python3`，用于 `doctor` 的 AI 分析
+- 可选：VS Code 命令行工具 `code`，用于 `vps code`
+- 可选：Transmit，`vps sftp` 会通过系统 `open` 打开 `sftp://...` 地址，主要适用于 macOS
 
-### 运维增强
+远程主机按实际命令需要提供：
 
-- 支持串行与并发执行
-- 批量任务失败不中断，并在结束后输出汇总结果
-- SSH 默认带连接超时与保活配置
-- 公钥分发支持自动去重
-- 配置文件支持合法性校验
+- Linux 常见工具：`df`、`free`、`ps`、`systemctl`、`journalctl` 等
+- Docker 相关命令只在远程主机安装 Docker 时可用
+- `update` / `upgrade` 默认执行 `sudo apt update` 和 `sudo apt -y upgrade`
 
-### 交互体验
-
-- 中文说明与提示信息
-- 菜单入口与直接命令并存
-- 批量命令会话支持历史记录、快捷词、命令重跑
-- 容器会话支持容器列表选择，减少记忆容器名的负担
-- AI 诊断支持 OpenAI 兼容接口
+Windows 可以通过 `vps.cmd` 或 `vps.ps1` 调用，但仍然依赖 Git Bash 或 WSL 提供 Bash 环境。
 
 ---
 
 ## 快速开始
 
-推荐按以下顺序完成初始化：
-
-1. 拉取项目代码
-2. 安装与运行
-3. 编写服务器配置
-4. 开始使用命令或菜单
-
-### 第一步：拉取项目代码
+### 1. 获取代码
 
 ```bash
 git clone https://github.com/maya1900/vps-pilot.git
 cd vps-pilot
 ```
 
-### 第二步：安装与运行
-
-macOS / Linux：
+### 2. 赋予执行权限
 
 ```bash
 chmod +x "./vps" "./vpsctl"
-./vps version
 ```
 
-Windows：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\vps.ps1 version
-```
-
-### 第三步：编写服务器配置
-
-复制示例配置：
+### 3. 创建配置文件
 
 ```bash
 cp "./servers.example.conf" "./servers.conf"
 ```
 
-编辑 `servers.conf`，填入你的服务器信息：
+编辑 `servers.conf`：
 
 ```text
-名称|用户|主机/IP|端口|私钥路径|密码
-oc1|root|192.168.1.10|22|~/.ssh/id_ed25519|
-oc2|root|192.168.1.11|22|-|your_password
+# 名称|用户|主机/IP|端口|私钥路径|密码
+oc1|root|1.2.3.4|22|~/.ssh/id_ed25519|
+oc2|ubuntu|example.com|2222|-|your_password
 ```
 
 字段说明：
 
-- `名称`：本地识别名，后续通过 `vps ssh <name>` 等命令使用
+- `名称`：本地别名，后续命令用它选择服务器
 - `用户`：SSH 登录用户
-- `主机/IP`：公网 IP、内网 IP 或域名
-- `端口`：SSH 端口，默认一般为 `22`
-- `私钥路径`：SSH 私钥路径；若暂时未知，可填写 `-`
-- `密码`：可选；保存后脚本会自动输入密码，交互 SSH 使用 OpenSSH askpass，远程命令使用 `expect`；执行 `copy-key` 成功后会自动清空
+- `主机/IP`：服务器 IP 或域名
+- `端口`：SSH 端口，默认通常是 `22`
+- `私钥路径`：私钥文件路径；暂不指定时填 `-`
+- `密码`：可选；保存后可以自动输入密码
 
-旧版 5 段配置仍然兼容。保存密码后请确保 `servers.conf` 不提交到公开仓库。
+配置支持旧版 5 段格式：`名称|用户|主机/IP|端口|私钥路径`。
 
-建议先执行一次配置校验：
+### 4. 校验配置
 
 ```bash
-vps validate
+./vps validate
 ```
 
-如果远程主机还没有配置免密登录，建议在配置完成后同步 SSH 公钥。
-
-请先确认本机已有 SSH 公钥，例如：
+### 5. 查看和登录
 
 ```bash
-~/.ssh/id_ed25519.pub
-```
-
-然后逐台同步：
-
-```bash
-vps copy-key oc1
-vps copy-key oc2
-```
-
-同步完成后，可优先测试 SSH 登录：
-
-```bash
-vps ssh oc1
-```
-
-### 第四步：开始使用
-
-```bash
-vps
-vps list
-vps status
-vps batch all
+./vps list
+./vps ssh oc1
 ```
 
 ---
 
-## 安装与运行
+## 安装到 PATH
 
-### macOS / Linux
-
-给予执行权限：
-
-```bash
-chmod +x "./vps" "./vpsctl"
-```
-
-如果当前目录就是项目目录，可以直接运行：
-
-```bash
-./vps
-./vps list
-```
-
-如需在任意目录运行：
+如果希望在任意目录直接输入 `vps`：
 
 ```bash
 mkdir -p "$HOME/.local/bin"
@@ -196,42 +141,41 @@ ln -sfn "$(pwd)/vps" "$HOME/.local/bin/vps"
 ln -sfn "$(pwd)/vpsctl" "$HOME/.local/bin/vpsctl"
 ```
 
-前提：
+确认 `$HOME/.local/bin` 已经在 `PATH` 中。
 
-- `~/.local/bin` 已经在你的 `PATH` 中
-- 如果项目目录被移动了，需要重新建立链接
+Windows 下可以直接调用：
 
-如果此前已经建立过全局命令，但执行 `vps` 提示找不到命令，或者 `which vps` 没有返回 `~/.local/bin/vps`，通常是软链接已经指向旧目录。可按下面方式重新修复：
-
-```bash
-chmod +x "/absolute/path/to/vps-pilot/vps" "/absolute/path/to/vps-pilot/vpsctl"
-ln -sfn "/absolute/path/to/vps-pilot/vps" "$HOME/.local/bin/vps"
-ln -sfn "/absolute/path/to/vps-pilot/vpsctl" "$HOME/.local/bin/vpsctl"
-hash -r
-vps version
+```powershell
+powershell -ExecutionPolicy Bypass -File .\vps.ps1 version
 ```
 
-### Windows
+或在 `cmd` 中：
 
-- 推荐通过 `Git Bash` 或 `WSL` 使用本项目
-- 项目已内置 Windows 包装器：
-  - `vps.cmd`
-  - `vps.ps1`
-- 在 `cmd` / `PowerShell` 中运行时，它们会自动尝试调用 `bash`
-
-临时运行：
-
-```bash
-bash ./vps
+```bat
+vps.cmd version
 ```
 
-如果通过原生 `cmd` / `PowerShell` 使用，并希望任意目录直接输入 `vps`，需要将项目目录加入 `PATH`，或者把 `vps.cmd` / `vps.ps1` 放到已在 `PATH` 的目录。
+---
+
+## 配置文件
+
+默认读取项目目录下的：
+
+```bash
+./servers.conf
+```
+
+可以通过环境变量指定其它配置文件：
+
+```bash
+VPSCTL_CONFIG="/path/to/servers.conf" vps list
+```
+
+`servers.conf` 会保存真实服务器信息和可选密码，默认不应提交到公开仓库。
 
 ---
 
 ## 命令总览
-
-### 常用命令
 
 ```bash
 vps list
@@ -242,12 +186,13 @@ vps ssh <name>
 vps sftp <name>
 vps code <name> [path] [--backup]
 vps backup <name> <path>
-vps ssh-config sync
+vps ssh-config [sync|show] [--file path]
 vps status [name|all] [--parallel]
 vps check [name|all] [--parallel]
-vps doctor <name> [service|container]
+vps doctor <name> [subject]
 vps batch <name|all> [--parallel]
 vps containers <name>
+vps docker <name>
 vps cbatch <name> [container]
 vps run <name|all> [--parallel] -- <command>
 vps update [name|all] [--parallel]
@@ -256,177 +201,229 @@ vps reboot [name|all]
 vps copy-key <name>
 vps validate
 vps version
+vps menu
 vps help
 ```
 
-### 命令说明
+常用别名：
 
-- `list`：查看服务器列表和当前配置的登录方式
-- `add`：增加服务器配置；不带参数时进入交互输入
-- `del`：删除服务器配置；默认要求确认，可用 `--yes` 跳过确认
-- `password`：给已有服务器保存或更新登录密码；不传密码时隐藏输入
-- `ssh`：登录指定服务器
-- `sftp`：用 Transmit 打开 SFTP 连接
-- `code`：用 VS Code 打开远程目录，可选打开前先备份
-- `backup`：先备份远程文件或目录
-- `ssh-config`：同步本机 `~/.ssh/config`，方便 Remote-SSH 使用
-- `status`：查看服务器状态；`all` 为简洁汇总，单机时输出更详细的系统信息
-- `check`：执行基础巡检，检查磁盘、内存、服务等明显异常
-- `doctor`：采集系统、服务、容器报错信息，并输出诊断结果
-- `batch`：进入批量命令会话，连续执行多条命令
-- `containers`：列出指定服务器上的容器
-- `cbatch`：进入容器批量命令会话
-- `run`：执行单条批量命令
-- `update`：刷新软件包索引
-- `upgrade`：升级系统软件包
-- `reboot`：重启主机
-- `copy-key`：将本机公钥写入远程主机
-- `validate`：校验配置文件
-- `version`：查看版本与作者信息
+```text
+ls -> list
+new -> add
+delete/remove/rm -> del
+passwd/pass -> password
+login -> ssh
+transmit -> sftp
+vscode -> code
+snapshot -> backup
+sshconfig -> ssh-config
+exec -> run
+diag/diagnose -> doctor
+console -> batch
+container-list -> containers
+container-batch -> cbatch
+copykey/copy-k/copyk -> copy-key
+```
 
 ---
 
-## 配置说明
+## 服务器配置管理
 
-### 配置文件
-
-默认配置文件路径：
-
-```bash
-./servers.conf
-```
-
-如需指定其它配置文件，可通过环境变量覆盖：
-
-```bash
-VPSCTL_CONFIG=/path/to/servers.conf vps list
-```
-
-可选环境变量：
-
-```bash
-VPSCTL_SSH_CONFIG_FILE=~/.ssh/config
-VPSCTL_CODE_BIN=code
-VPSCTL_AI_API_KEY=your_api_key
-VPSCTL_AI_MODEL=gpt-4o-mini
-VPSCTL_AI_API_URL=https://api.openai.com/v1/chat/completions
-```
-
-说明：
-
-- 如果 `code` 不在全局 `PATH` 里，脚本会继续尝试常见的 macOS 安装路径
-- 也可以手动指定：
-
-```bash
-VPSCTL_CODE_BIN="/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code" vps code oc1
-```
-
-### 示例配置
-
-- [servers.example.conf](./servers.example.conf)
-- `servers.conf`：你的本地实际配置文件，需要自行创建，不会进入仓库
-
-注意：真实 `servers.conf` 已被 `.gitignore` 忽略，默认不会进入仓库。
-
----
-
-## 使用示例
-
-### 查看服务器列表
-
-```bash
-vps list
-```
-
-列表里的 `登录` 列来自本地配置：`密钥`、`密码`、`密钥+密码` 或 `默认`。它不再逐台发起 SSH 探测。
-
-### 增加服务器配置
+交互式新增：
 
 ```bash
 vps add
+```
+
+命令式新增：
+
+```bash
 vps add oc1 root 1.2.3.4
 vps add oc2 ubuntu example.com 2222 ~/.ssh/id_ed25519
 vps add yy1 root 70.39.181.190 28780 - 'your_password'
 ```
 
-`port` 默认是 `22`，`key` 默认是 `-`，`password` 默认不保存。只保存密码时，`vps ssh` 会使用 OpenSSH askpass 自动输入密码；`vps run`、`vps status`、`vps check`、`vps copy-key` 等远程命令会使用 `expect` 自动输入密码。`copy-key` 成功后会清空密码，并改用配置里的私钥或默认 `~/.ssh/id_ed25519`。
-
-交互执行 `vps add` 时会立即检查配置名称是否重复；选择密码登录后，可以选择马上写入公钥并改用密钥登录，或者只保存密码。
-
-给已有配置补密码：
-
-```bash
-vps password yy1
-```
-
-### 删除服务器配置
+删除配置：
 
 ```bash
 vps del oc1
 vps del oc1 --yes
 ```
 
-删除只会修改本地 `servers.conf`，不会连接远程主机。
+更新密码：
 
-### 登录某一台服务器
+```bash
+vps password yy1
+vps password yy1 'new_password'
+```
+
+`del` 只修改本地 `servers.conf`，不会删除远程服务器。
+
+---
+
+## 登录与认证
+
+登录服务器：
 
 ```bash
 vps ssh oc1
 ```
 
-### 用 Transmit 打开 SFTP
+分发本机公钥：
 
 ```bash
-vps sftp oc1
+vps copy-key oc1
 ```
 
-执行后会自动调起 Transmit 并打开对应服务器的 SFTP 连接。
+`copy-key` 会把本机公钥写入远程 `~/.ssh/authorized_keys`，并自动去重。成功后会把该服务器配置里的密码清空，改用私钥路径。
 
-支持别名 `vps transmit <name>`。如需指定私钥，请在 Transmit 连接设置中配置。
+密码登录说明：
 
-### 查看所有服务器状态
+- 交互式 `vps ssh` 使用 OpenSSH askpass 自动输入密码
+- `run`、`status`、`check`、`copy-key` 等远程命令使用 `expect` 自动输入密码
+- 仅密码登录不支持 `--parallel`，需要先执行 `copy-key` 改成密钥登录
 
-```bash
-vps status
-vps status --parallel
-```
+---
 
-### 查看单台机器详细状态
+## SSH Config 与 VS Code
 
-```bash
-vps status oc1
-```
-
-说明：
-
-- `vps status` 或 `vps status all` 适合批量巡检
-- `vps status oc1` 适合单机深看，会展示主机、系统、CPU、内存、磁盘、网络、运营商、时间、运行时长等信息
-
-### 执行基础巡检
-
-```bash
-vps check
-```
-
-### 在 VS Code 中打开远程目录
+同步 `~/.ssh/config`：
 
 ```bash
 vps ssh-config sync
+```
+
+预览将写入的配置：
+
+```bash
+vps ssh-config show
+```
+
+指定目标文件：
+
+```bash
+vps ssh-config sync --file ~/.ssh/config
+```
+
+用 VS Code Remote-SSH 打开远程目录：
+
+```bash
 vps code oc1
-vps code oc1 /home
 vps code oc1 /opt/app
 vps code oc1 etc
 vps code oc1 /etc/nginx --backup
 ```
 
-路径说明：
+路径规则：
 
-- 不传路径时，默认打开远程登录用户的家目录
-- 例如：`root -> /root`，`ubuntu -> /home/ubuntu`，`opc -> /home/opc`
-- 传绝对路径时，直接打开对应目录，例如 `/home`、`/opt/app`
-- 也支持几个常用短写：`home`、`etc`、`var`、`opt`、`srv`、`usr`、`/`
+- 不传路径时打开远程登录用户的家目录
+- 绝对路径会原样使用，例如 `/opt/app`
+- `~` 和 `~/path` 会解析为远程用户家目录
+- 支持短写：`home`、`root`、`etc`、`var`、`opt`、`srv`、`usr`、`/`、`rootfs`、`fs`
 
-### 诊断服务或容器问题
+`vps code` 会先同步 SSH config，再调用本机 VS Code 命令行工具。
+
+---
+
+## SFTP
+
+通过 Transmit 打开 SFTP：
+
+```bash
+vps sftp oc1
+vps transmit oc1
+```
+
+该命令会打开 `sftp://user@host:port` 地址。私钥、收藏夹等高级连接设置由 Transmit 自身处理，实际依赖系统 `open`，主要适用于 macOS。
+
+---
+
+## 远程备份
+
+备份远程文件或目录：
+
+```bash
+vps backup oc1 /etc/nginx
+vps backup oc1 /opt/app/.env
+```
+
+备份保存到远程主机：
+
+```text
+~/.vps-pilot/backups/
+```
+
+目录会打成 `tar.gz`，文件会复制到带时间戳的目录里。
+
+为避免误备份超大目录，`backup` 会拒绝直接备份 `/`、`/root`、`/home`。
+
+---
+
+## 批量执行
+
+对所有服务器串行执行：
+
+```bash
+vps run all -- uptime
+```
+
+对所有服务器并发执行：
+
+```bash
+vps run all --parallel -- docker ps
+```
+
+对单台执行：
+
+```bash
+vps run oc1 -- df -h
+```
+
+`status`、`check`、`update`、`upgrade` 也支持 `[name|all] [--parallel]`：
+
+```bash
+vps status
+vps status oc1
+vps check all --parallel
+vps update all
+vps upgrade oc1
+```
+
+重启需要输入 `YES` 确认：
+
+```bash
+vps reboot oc1
+vps reboot all
+```
+
+---
+
+## 状态、巡检与诊断
+
+状态查看：
+
+```bash
+vps status
+vps status oc1
+```
+
+`vps status all` 输出适合批量扫一遍。`vps status <name>` 会输出更详细的系统、CPU、内存、磁盘、流量、网络、定位和运行时间信息。
+
+基础巡检：
+
+```bash
+vps check
+vps check oc1
+```
+
+巡检会检查：
+
+- 当前用户和 sudo 状态
+- 根分区使用率
+- 可用内存
+- 常见服务状态：`sshd`、`ssh`、`nginx`、`docker`、`cron`
+
+诊断采集：
 
 ```bash
 vps doctor oc1
@@ -434,53 +431,31 @@ vps doctor oc1 nginx
 vps doctor oc1 my-container
 ```
 
-### 批量执行命令
+`doctor` 会采集基础信息、最近错误日志、监听端口、Docker 概览，并对指定 systemd 服务或 Docker 容器补充状态和日志。随后会做本地规则分析。
+
+可选 AI 分析环境变量：
 
 ```bash
-vps run all -- docker ps
-vps run all --parallel -- docker ps
+export VPSCTL_AI_API_KEY="your_api_key"
+export VPSCTL_AI_MODEL="gpt-4o-mini"
+export VPSCTL_AI_API_URL="https://api.openai.com/v1/chat/completions"
 ```
 
-### 刷新与升级系统包
-
-```bash
-vps update
-vps upgrade
-```
-
-### 分发公钥
-
-```bash
-vps copy-key oc1
-```
-
-### 先备份再改远程文件
-
-```bash
-vps backup oc1 /etc/nginx
-vps backup oc1 /opt/app/.env
-vps code oc1 /etc/nginx --backup
-```
-
-说明：
-
-- Remote-SSH 保存时会直接修改远程文件
-- 对 `/etc`、`/opt`、`/var` 这类目录，建议先备份再编辑
-- `backup` 会把备份放到远程 `~/.vps-pilot/backups/` 下
+未设置 AI 环境变量时，`doctor` 仍会输出原始诊断信息和本地规则分析。
 
 ---
 
 ## 批量命令会话
 
-批量命令会话适合连续执行多条命令，而不是每次都重复输入 `vps run`。
-
-进入会话：
+进入宿主机批量会话：
 
 ```bash
 vps batch all
+vps batch all --parallel
+vps batch oc1
 ```
 
-会话中可连续执行：
+会话中直接输入远程命令：
 
 ```bash
 docker ps
@@ -488,204 +463,141 @@ systemctl status nginx --no-pager
 cd /opt/app && git pull && docker compose up -d
 ```
 
-### 会话辅助命令
+会话辅助命令：
 
-```bash
-:history
-:shortcuts
-!!
-!3
-:q
+```text
+:help       查看说明
+:history    查看本次会话历史
+:shortcuts  查看快捷词
+!!          重跑上一条命令
+!3          重跑第 3 条历史命令
+:q          退出
 ```
 
-说明如下：
+宿主机会话快捷词：
 
-- `:history`：查看当前会话历史
-- `:shortcuts`：查看快捷词
-- `!!`：重跑上一条命令
-- `!3`：重跑第 3 条命令
-- `:q`：退出会话
-
-### 宿主机会话快捷词
-
-```bash
-ps
-nginx
-docker
-disk
-mem
-ports
-restart-nginx
-restart-docker
+```text
+ps             -> docker ps
+nginx          -> systemctl status nginx --no-pager
+docker         -> systemctl status docker --no-pager
+disk           -> df -h
+mem            -> free -h
+ports          -> ss -tulpn
+restart-nginx  -> sudo systemctl restart nginx
+restart-docker -> sudo systemctl restart docker
 ```
 
 ---
 
-## 容器批量命令会话
+## Docker 容器命令
 
-容器会话用于在指定服务器的某个容器内部，连续执行命令。
+列出某台服务器上的容器：
 
-### 方式一：已知容器名
+```bash
+vps containers oc1
+vps docker oc1
+```
+
+进入容器批量会话：
 
 ```bash
 vps cbatch oc1 myapp
 ```
 
-### 方式二：忘记容器名
-
-先查看容器：
-
-```bash
-vps containers oc1
-```
-
-或者直接：
+不传容器名时，交互终端会先列出容器并让你选择：
 
 ```bash
 vps cbatch oc1
 ```
 
-此时脚本会先列出容器，支持输入：
-
-- 容器序号
-- 容器名
-
-### 容器会话执行方式
-
-容器会话中的每一条命令，都会自动包装为：
+容器会话里的命令会被包装为：
 
 ```bash
-docker exec <container> sh -lc '<你的命令>'
+docker exec <container> sh -lc '<command>'
 ```
 
-例如：
+容器会话快捷词：
 
-```bash
-pwd
-ls
-env
-ps
-```
-
-### 容器会话快捷词
-
-```bash
-ps
-ls
-env
-pwd
-ports
-restart
+```text
+ps      -> ps
+ls      -> ls -lah
+env     -> env | sort
+pwd     -> pwd
+ports   -> ss -tulpn || netstat -tulpn
+restart -> supervisorctl restart all || s6-svc -r /var/run/s6/services/* || true
 ```
 
 ---
 
 ## 菜单模式
 
-直接输入：
+直接运行：
 
 ```bash
 vps
 ```
 
-即可进入菜单模式。
-
-菜单适合以下场景：
-
-- 不想记完整命令
-- 只想快速查看状态、容器列表、执行常见操作
-- 需要通过交互方式选择服务器或容器
-
-查看类菜单项输出完成后，按任意键即可返回菜单。
-
----
-
-## 开发规划
-
-- 下一版本方向见 [ROADMAP.md](./ROADMAP.md)
-- 设计与分期实现说明见 [docs/development-plan.md](./docs/development-plan.md)
-
-当前已落地的一期能力：
-
-- `add [name user host [port] [key] [password]]`
-- `del <name> [--yes]`
-- `password <name> [password]`
-- `ssh-config sync`
-- `code <name> [path] [--backup]`
-- `backup <name> <path>`
-- `doctor <name> [service|container]`
-
-下一步重点方向：
-
-- 对话式 `vps chat <name>` 运维助手
-- 远程目录挂载能力
-- 诊断结果导出与复盘
-
----
-
-## 版本信息
-
-查看当前版本：
+或：
 
 ```bash
-vps version
+vps menu
 ```
 
-当前版本信息：
+菜单提供列表、添加、删除、状态、巡检、更新、升级、登录、SFTP、批量会话、VS Code 打开目录、批量执行、重启、配置校验和版本信息入口。
 
-- 项目名：`VPS Pilot`
-- 版本：`v0.2.0`
-- 作者：`markyal`
+---
+
+## 环境变量
+
+```bash
+VPSCTL_CONFIG=/path/to/servers.conf
+VPSCTL_HISTORY_FILE=/path/to/.vps_batch_history
+VPSCTL_SSH_CONFIG_FILE=~/.ssh/config
+VPSCTL_CODE_BIN=code
+VPSCTL_AI_API_KEY=your_api_key
+VPSCTL_AI_MODEL=gpt-4o-mini
+VPSCTL_AI_API_URL=https://api.openai.com/v1/chat/completions
+```
 
 ---
 
 ## 项目结构
 
-当前核心文件如下：
+```text
+.
+├── vps                    # 主脚本
+├── vpsctl                 # 兼容入口，转发到 vps
+├── vps.cmd                # Windows CMD 包装器
+├── vps.ps1                # Windows PowerShell 包装器
+├── servers.example.conf   # 示例配置
+├── README.md              # 项目说明
+├── CHANGELOG.md           # 版本变更
+├── ROADMAP.md             # 规划记录，不代表当前能力
+├── LICENSE
+└── docs/
+    ├── development-plan.md
+    └── screenshots/
+```
 
-- [vps](./vps)：主脚本
-- [vpsctl](./vpsctl)：兼容入口
-- [vps.cmd](./vps.cmd)：Windows CMD 包装器
-- [vps.ps1](./vps.ps1)：Windows PowerShell 包装器
-- [README.md](./README.md)：项目说明
-- [CHANGELOG.md](./CHANGELOG.md)：版本变更记录
-- [ROADMAP.md](./ROADMAP.md)：下一版本开发清单
-- [docs/development-plan.md](./docs/development-plan.md)：开发设计文档
-- [servers.example.conf](./servers.example.conf)：示例配置
-- `servers.conf`：本地实际配置，不纳入仓库
-- [docs/screenshots](./docs/screenshots)：README 截图资源
-- [.gitignore](./.gitignore)：仓库忽略规则
-- [LICENSE](./LICENSE)：开源许可证
+本地运行后可能出现：
 
----
-
-## 发布说明
-
-仓库建议提交以下文件：
-
-- `vps`
-- `vpsctl`
-- `vps.cmd`
-- `vps.ps1`
-- `README.md`
-- `CHANGELOG.md`
-- `ROADMAP.md`
-- `LICENSE`
-- `servers.example.conf`
-- `.gitignore`
-
-不建议提交：
-
-- `servers.conf`
-- `.vps_batch_history`
-
-这样可以避免将真实服务器信息、本地操作历史等内容带入公开仓库。
+```text
+servers.conf         # 本地真实服务器配置，不应提交
+.vps_batch_history   # 批量会话历史
+```
 
 ---
 
 ## 安全提示
 
-- 请确认目标主机、SSH 用户和密钥来源可信
-- 批量执行命令前，建议先对单台主机验证结果
-- `upgrade`、`reboot` 等命令具有实际影响，请谨慎使用
-- 若使用公开仓库，请勿提交真实 IP、私钥路径及敏感运维习惯配置
+- 不要把真实 `servers.conf` 提交到公开仓库
+- 保存密码时，确认本机文件权限和使用环境可信
+- 批量命令先在单台机器验证，再对 `all` 执行
+- `upgrade`、`reboot`、`run all --parallel` 都会真实影响远程主机
+- 打开 `/etc`、`/opt`、`/var` 等目录前，建议先执行 `vps backup`
+
+---
+
+## 许可证
+
+[MIT License](./LICENSE)

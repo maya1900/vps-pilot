@@ -283,6 +283,18 @@ find_server() {
   return 1
 }
 
+require_server_line() {
+  local target="$1"
+  local line
+
+  if ! line="$(find_server "${target}")"; then
+    echo "没找到服务器: ${target}" >&2
+    return 1
+  fi
+
+  printf '%s\n' "${line}"
+}
+
 parse_server() {
   local line="$1"
 
@@ -1358,8 +1370,7 @@ save_server_password() {
   local password="$2"
   local line
 
-  if ! line="$(find_server "${target}")"; then
-    echo "没找到服务器: ${target}"
+  if ! line="$(require_server_line "${target}")"; then
     return 1
   fi
 
@@ -1430,8 +1441,7 @@ delete_server_config() {
   local temp_file
   local removed=0
 
-  if ! line="$(find_server "${target}")"; then
-    echo "没找到服务器: ${target}"
+  if ! line="$(require_server_line "${target}")"; then
     return 1
   fi
 
@@ -1523,8 +1533,7 @@ get_containers_for_target() {
   local target="$1"
   local line
 
-  if ! line="$(find_server "${target}")"; then
-    echo "没找到服务器: ${target}"
+  if ! line="$(require_server_line "${target}")"; then
     return 1
   fi
 
@@ -1712,8 +1721,7 @@ run_for_target() {
     return $?
   fi
 
-  if ! line="$(find_server "${target}")"; then
-    echo "没找到服务器: ${target}"
+  if ! line="$(require_server_line "${target}")"; then
     exit 1
   fi
   run_remote_command "${line}" "${remote_cmd}" "${mode}"
@@ -1723,8 +1731,7 @@ ssh_into_server() {
   local target="$1"
   local line
 
-  if ! line="$(find_server "${target}")"; then
-    echo "没找到服务器: ${target}"
+  if ! line="$(require_server_line "${target}")"; then
     exit 1
   fi
 
@@ -1745,8 +1752,7 @@ open_transmit_sftp() {
   local target="$1"
   local line
 
-  if ! line="$(find_server "${target}")"; then
-    echo "没找到服务器: ${target}"
+  if ! line="$(require_server_line "${target}")"; then
     exit 1
   fi
 
@@ -1774,8 +1780,7 @@ copy_key() {
   local line
   local copy_status
 
-  if ! line="$(find_server "${target}")"; then
-    echo "没找到服务器: ${target}"
+  if ! line="$(require_server_line "${target}")"; then
     exit 1
   fi
 
@@ -1922,8 +1927,7 @@ resolve_remote_home() {
   local target="$1"
   local line
 
-  if ! line="$(find_server "${target}")"; then
-    echo "没找到服务器: ${target}" >&2
+  if ! line="$(require_server_line "${target}")"; then
     return 1
   fi
 
@@ -2008,8 +2012,7 @@ backup_remote_path() {
   local resolved_path
   local backup_command
 
-  if ! line="$(find_server "${target}")"; then
-    echo "没找到服务器: ${target}"
+  if ! line="$(require_server_line "${target}")"; then
     return 1
   fi
 
@@ -2348,8 +2351,7 @@ doctor_target() {
   local subject="${2:-}"
   local line report
 
-  if ! line="$(find_server "${target}")"; then
-    echo "没找到服务器: ${target}"
+  if ! line="$(require_server_line "${target}")"; then
     return 1
   fi
 
