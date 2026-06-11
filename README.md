@@ -70,7 +70,7 @@ VPS Pilot 是一个本地命令行工具，用来在一台电脑上统一管理�
 
 - Linux 常见工具：`df`、`free`、`ps`、`systemctl`、`journalctl` 等
 - Docker 相关命令只在远程主机安装 Docker 时可用
-- `update` / `upgrade` 默认执行 `sudo apt update` 和 `sudo apt -y upgrade`
+- `update` / `upgrade` / `reboot` 会执行 `sudo -n` 命令，远程用户需要配置免密 sudo
 
 Windows 可以通过 `vps.cmd` 或 `vps.ps1` 调用，但仍然依赖 Git Bash 或 WSL 提供 Bash 环境。
 
@@ -102,7 +102,7 @@ cp "./servers.example.conf" "./servers.conf"
 ```text
 # 名称|用户|主机/IP|端口|私钥路径|密码
 oc1|root|1.2.3.4|22|~/.ssh/id_ed25519|
-oc2|ubuntu|example.com|2222|-|your_password
+oc2|ubuntu|example.com|2222|-|
 ```
 
 字段说明：
@@ -112,7 +112,7 @@ oc2|ubuntu|example.com|2222|-|your_password
 - `主机/IP`：服务器 IP 或域名
 - `端口`：SSH 端口，默认通常是 `22`
 - `私钥路径`：私钥文件路径；暂不指定时填 `-`
-- `密码`：可选；保存后可以自动输入密码
+- `密码`：可选；建议用 `vps password <name>` 交互隐藏输入，避免明文进入 shell 历史
 
 配置支持旧版 5 段格式：`名称|用户|主机/IP|端口|私钥路径`。
 
@@ -240,7 +240,6 @@ vps add
 ```bash
 vps add oc1 root 1.2.3.4
 vps add oc2 ubuntu example.com 2222 ~/.ssh/id_ed25519
-vps add yy1 root 70.39.181.190 28780 - 'your_password'
 ```
 
 删除配置：
@@ -254,10 +253,10 @@ vps del oc1 --yes
 
 ```bash
 vps password yy1
-vps password yy1 'new_password'
 ```
 
 `del` 只修改本地 `servers.conf`，不会删除远程服务器。
+`vps add ... [password]` 和 `vps password <name> <password>` 仍兼容命令行传密码，但这会暴露在 shell 历史和进程列表里，不建议使用。
 
 ---
 
@@ -441,7 +440,7 @@ export VPSCTL_AI_MODEL="gpt-4o-mini"
 export VPSCTL_AI_API_URL="https://api.openai.com/v1/chat/completions"
 ```
 
-未设置 AI 环境变量时，`doctor` 仍会输出原始诊断信息和本地规则分析。
+启用 AI 分析后，诊断报告会发送到 `VPSCTL_AI_API_URL`。交互模式会要求确认；非交互自动化可设置 `VPSCTL_AI_DOCTOR_ASSUME_YES=1`。未设置 AI 环境变量时，`doctor` 仍会输出原始诊断信息和本地规则分析。
 
 ---
 
@@ -483,8 +482,8 @@ docker         -> systemctl status docker --no-pager
 disk           -> df -h
 mem            -> free -h
 ports          -> ss -tulpn
-restart-nginx  -> sudo systemctl restart nginx
-restart-docker -> sudo systemctl restart docker
+restart-nginx  -> sudo -n systemctl restart nginx
+restart-docker -> sudo -n systemctl restart docker
 ```
 
 ---
@@ -551,12 +550,20 @@ vps menu
 
 ```bash
 VPSCTL_CONFIG=/path/to/servers.conf
+VPSCTL_STATE_DIR=~/.config/vps-pilot
 VPSCTL_HISTORY_FILE=/path/to/.vps_batch_history
 VPSCTL_SSH_CONFIG_FILE=~/.ssh/config
+VPSCTL_SSH_STRICT_HOST_KEY_CHECKING=accept-new
+VPSCTL_SSH_CONTROL=auto
+VPSCTL_SSH_CONTROL_DIR=~/.config/vps-pilot/ssh-control
+VPSCTL_SSH_CONTROL_PERSIST=10m
+VPSCTL_PARALLEL_LIMIT=8
 VPSCTL_CODE_BIN=code
 VPSCTL_AI_API_KEY=your_api_key
 VPSCTL_AI_MODEL=gpt-4o-mini
 VPSCTL_AI_API_URL=https://api.openai.com/v1/chat/completions
+VPSCTL_AI_DOCTOR_ASSUME_YES=1
+VPSCTL_AI_DOCTOR_REDACT=1
 ```
 
 ---

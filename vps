@@ -13,8 +13,15 @@ resolve_script_dir() {
 }
 
 SCRIPT_DIR="$(resolve_script_dir)"
-CONFIG_FILE="${VPSCTL_CONFIG:-${SCRIPT_DIR}/servers.conf}"
-HISTORY_FILE="${VPSCTL_HISTORY_FILE:-${SCRIPT_DIR}/.vps_batch_history}"
+STATE_DIR="${VPSCTL_STATE_DIR:-${XDG_CONFIG_HOME:-${HOME}/.config}/vps-pilot}"
+if [[ -n "${VPSCTL_CONFIG:-}" ]]; then
+  CONFIG_FILE="${VPSCTL_CONFIG}"
+elif [[ -f "${SCRIPT_DIR}/servers.conf" ]]; then
+  CONFIG_FILE="${SCRIPT_DIR}/servers.conf"
+else
+  CONFIG_FILE="${STATE_DIR}/servers.conf"
+fi
+HISTORY_FILE="${VPSCTL_HISTORY_FILE:-${STATE_DIR}/.vps_batch_history}"
 APP_NAME="VPS Pilot"
 APP_VERSION="v0.2.0"
 APP_AUTHOR="markyal"
@@ -27,9 +34,13 @@ CODE_BIN="${VPSCTL_CODE_BIN:-code}"
 AI_API_URL="${VPSCTL_AI_API_URL:-https://api.openai.com/v1/chat/completions}"
 AI_API_KEY="${VPSCTL_AI_API_KEY:-}"
 AI_MODEL="${VPSCTL_AI_MODEL:-}"
+SSH_STRICT_HOST_KEY_CHECKING="${VPSCTL_SSH_STRICT_HOST_KEY_CHECKING:-accept-new}"
+PARALLEL_LIMIT="${VPSCTL_PARALLEL_LIMIT:-8}"
+SSH_CONTROL="${VPSCTL_SSH_CONTROL:-auto}"
+SSH_CONTROL_DIR="${VPSCTL_SSH_CONTROL_DIR:-${STATE_DIR}/ssh-control}"
 
 if ! command -v ssh >/dev/null 2>&1; then
-  echo "缺少 ssh 命令，先安装 OpenSSH 客户端。"
+  echo "缺少 ssh 命令，先安装 OpenSSH 客户端。" >&2
   exit 1
 fi
 
@@ -68,6 +79,10 @@ style_text() {
   local style="$1"
   shift
   printf '%s%s%s' "${style}" "$*" "${STYLE_RESET}"
+}
+
+err() {
+  printf '%s\n' "$*" >&2
 }
 
 print_rule() {
@@ -144,8 +159,8 @@ by ${APP_AUTHOR}
   docker <name>     containers 的别名，顺手党直接用
   cbatch            进入容器批量命令会话，命令自动在容器内执行
   run <target> --   对一台或全部机器执行命令
-  update [target]   只刷新软件包索引
-  upgrade [target]  真正升级系统软件包
+  update [target]   只刷新软件包索引，使用 sudo -n
+  upgrade [target]  真正升级系统软件包，使用 sudo -n
   reboot [target]   重启一台或全部机器
   copy-key <name>   写入本机公钥，方便免密登录
   validate          检查配置文件有没有填错
@@ -154,7 +169,7 @@ by ${APP_AUTHOR}
   help              查看帮助
 
 配置文件:
-  默认读取当前目录下的 servers.conf
+  默认优先读取脚本目录下已有的 servers.conf；新配置写到 ${STATE_DIR}/servers.conf
   也可以通过环境变量 VPSCTL_CONFIG 指定其它路径
 
 AI 诊断可选环境变量:
@@ -236,8 +251,8 @@ EOF
 
 ensure_config() {
   if [[ ! -f "${CONFIG_FILE}" ]]; then
-    echo "没找到配置文件: ${CONFIG_FILE}"
-    echo "先复制 servers.example.conf 为 servers.conf，再填你的 VPS 信息。"
+    err "没找到配置文件: ${CONFIG_FILE}"
+    err "先复制 servers.example.conf 为 servers.conf，再填你的 VPS 信息。"
     exit 1
   fi
 }
@@ -342,8 +357,20 @@ ssh_args_for_current_server() {
     -o ConnectTimeout=8
     -o ServerAliveInterval=15
     -o ServerAliveCountMax=2
-    -o StrictHostKeyChecking=accept-new
+    -o StrictHostKeyChecking="${SSH_STRICT_HOST_KEY_CHECKING}"
   )
+  if [[ "${SSH_CONTROL}" != "0" && "${SSH_CONTROL}" != "no" && "${SSH_CONTROL}" != "off" ]]; then
+    if mkdir -p "${SSH_CONTROL_DIR}" 2>/dev/null; then
+      chmod 700 "${SSH_CONTROL_DIR}" 2>/dev/null || true
+      CURRENT_SSH_ARGS+=(
+        -o ControlMaster=auto
+        -o ControlPersist="${VPSCTL_SSH_CONTROL_PERSIST:-10m}"
+        -o ControlPath="${SSH_CONTROL_DIR}/%r@%h:%p"
+      )
+    else
+      err "无法创建 SSH 连接复用目录，已降级为普通 SSH: ${SSH_CONTROL_DIR}"
+    fi
+  fi
   if [[ "${mode}" == "parallel" ]]; then
     CURRENT_SSH_ARGS+=(-n -o BatchMode=yes)
   fi
@@ -357,7 +384,10 @@ run_expect_password_ssh() {
   local password
   password="$(expect_escape "${SERVER_PASSWORD}")"
 
-  expect -f - -- "${CURRENT_SSH_ARGS[@]}" "${SERVER_USER}@${SERVER_HOST}" ${remote_cmd:+"${remote_cmd}"} <<EOF
+  set -- "${CURRENT_SSH_ARGS[@]}" "${SERVER_USER}@${SERVER_HOST}"
+  [[ -n "${remote_cmd}" ]] && set -- "$@" "${remote_cmd}"
+
+  expect -f - -- "$@" <<EOF
 set timeout -1
 set password "${password}"
 set command [list ssh {*}\$argv]
@@ -390,6 +420,10 @@ run_askpass_password_ssh_interactive() {
   askpass_dir="$(mktemp -d "${TMPDIR:-/tmp}/vps-pilot-askpass.XXXXXX")"
   askpass_file="${askpass_dir}/askpass"
   password_file="${askpass_dir}/password"
+  cleanup_askpass_dir() {
+    [[ -n "${askpass_dir:-}" ]] && rm -rf "${askpass_dir}"
+  }
+  trap cleanup_askpass_dir EXIT INT TERM
 
   chmod 700 "${askpass_dir}"
   printf '%s' "${SERVER_PASSWORD}" > "${password_file}"
@@ -409,7 +443,8 @@ EOF
   ssh_status=$?
   set -e
 
-  rm -rf "${askpass_dir}"
+  cleanup_askpass_dir
+  trap - EXIT INT TERM
   return "${ssh_status}"
 }
 
@@ -419,13 +454,16 @@ run_ssh_for_current_server() {
   local -a auth_args=()
 
   if server_has_password && [[ "${mode}" == "parallel" && "${SERVER_KEY}" == "-" ]]; then
-    echo "密码登录不支持并发模式，请先执行 copy-key 写入公钥。"
+    err "密码登录不支持并发模式，请先执行 copy-key 写入公钥。"
     return 1
   fi
 
   if server_has_password && [[ "${mode}" != "parallel" ]]; then
+    if [[ "${SSH_STRICT_HOST_KEY_CHECKING}" == "accept-new" ]]; then
+      echo "提示: 密码登录首次连接会自动接受新主机密钥；如需更严格校验，可设置 VPSCTL_SSH_STRICT_HOST_KEY_CHECKING=ask。"
+    fi
     if ! command -v expect >/dev/null 2>&1; then
-      echo "当前配置只有密码可用，但系统缺少 expect，无法自动输入密码。"
+      err "当前配置只有密码可用，但系统缺少 expect，无法自动输入密码。"
       return 1
     fi
     auth_args=(-o PreferredAuthentications=publickey,password,keyboard-interactive -o NumberOfPasswordPrompts=1)
@@ -495,6 +533,11 @@ list_servers() {
   print_banner
   echo
   print_section_title "服务器列表"
+  if [[ ! -f "${CONFIG_FILE}" ]]; then
+    err "还没有配置文件: ${CONFIG_FILE}"
+    err "可在菜单里选择 add，或执行: ${APP_CMD} add"
+    return 1
+  fi
   printf '%-12s %-12s %-24s %-6s %-8s %s\n' \
     "$(style_text "${STYLE_ACCENT}" "名称")" \
     "$(style_text "${STYLE_ACCENT}" "用户")" \
@@ -572,7 +615,16 @@ else
 fi
 echo "public ip:"
 if command -v curl >/dev/null 2>&1; then
-  curl -fsS --max-time 4 ifconfig.me 2>/dev/null || curl -fsS --max-time 4 api.ipify.org 2>/dev/null || echo "unavailable"
+  tmp_dir="$(mktemp -d 2>/dev/null || mktemp -d -t vps-pilot-ip.XXXXXX)"
+  (curl -fsS --max-time 3 ifconfig.me >"${tmp_dir}/ifconfig" 2>/dev/null) &
+  pid1=$!
+  (curl -fsS --max-time 3 api.ipify.org >"${tmp_dir}/ipify" 2>/dev/null) &
+  pid2=$!
+  wait "${pid1}" 2>/dev/null || true
+  wait "${pid2}" 2>/dev/null || true
+  public_ip="$(awk 'NF {print; exit}' "${tmp_dir}/ifconfig" "${tmp_dir}/ipify" 2>/dev/null)"
+  rm -rf "${tmp_dir}"
+  [ -n "${public_ip}" ] && echo "${public_ip}" || echo "unavailable"
 else
   echo "curl unavailable"
 fi
@@ -681,7 +733,7 @@ else
   disk_value="-"
 fi
 
-net_dev_line="$(awk -F'[: ]+' '$1 !~ /^(lo|Inter|face)$/ {rx += $3; tx += $11} END {print rx "|" tx}' /proc/net/dev 2>/dev/null)"
+net_dev_line="$(awk -F'[: ]+' 'NR > 2 && $2 != "lo" {rx += $3; tx += $11} END {print rx "|" tx}' /proc/net/dev 2>/dev/null)"
 IFS='|' read -r rx_bytes tx_bytes <<<"${net_dev_line}"
 [ -n "${rx_bytes}" ] || rx_bytes=0
 [ -n "${tx_bytes}" ] || tx_bytes=0
@@ -694,7 +746,16 @@ network_algo="${cc_value} ${qdisc_value}"
 
 public_ip="-"
 if command -v curl >/dev/null 2>&1; then
-  public_ip="$(curl -fsS --max-time 4 ifconfig.me 2>/dev/null || curl -fsS --max-time 4 api.ipify.org 2>/dev/null || echo "-")"
+  tmp_dir="$(mktemp -d 2>/dev/null || mktemp -d -t vps-pilot-ip.XXXXXX)"
+  (curl -fsS --max-time 3 ifconfig.me >"${tmp_dir}/ifconfig" 2>/dev/null) &
+  pid1=$!
+  (curl -fsS --max-time 3 api.ipify.org >"${tmp_dir}/ipify" 2>/dev/null) &
+  pid2=$!
+  wait "${pid1}" 2>/dev/null || true
+  wait "${pid2}" 2>/dev/null || true
+  public_ip="$(awk 'NF {print; exit}' "${tmp_dir}/ifconfig" "${tmp_dir}/ipify" 2>/dev/null)"
+  rm -rf "${tmp_dir}"
+  [ -n "${public_ip}" ] || public_ip="-"
 fi
 
 dns_value="$(awk '/^nameserver/ {print $2}' /etc/resolv.conf 2>/dev/null | paste -sd ',' -)"
@@ -703,7 +764,11 @@ dns_value="$(awk '/^nameserver/ {print $2}' /etc/resolv.conf 2>/dev/null | paste
 carrier_value="-"
 geo_value="-"
 if command -v curl >/dev/null 2>&1; then
-  ip_meta="$(curl -fsS --max-time 5 "https://ipinfo.io/${public_ip}/json" 2>/dev/null || true)"
+  if [ "${public_ip}" != "-" ]; then
+    ip_meta="$(curl -fsS --max-time 3 "https://ipinfo.io/${public_ip}/json" 2>/dev/null || true)"
+  else
+    ip_meta=""
+  fi
   if [ -n "${ip_meta}" ] && command -v python3 >/dev/null 2>&1; then
     meta_output="$(
       VPSCTL_IPINFO_JSON="${ip_meta}" python3 - <<'PY'
@@ -873,7 +938,7 @@ parse_run_args() {
   done
 
   if [[ -z "${RUN_TARGET}" || $# -eq 0 ]]; then
-    echo "用法: vps run <name|all> [--parallel] -- <command>"
+    err "用法: vps run <name|all> [--parallel] -- <command>"
     return 1
   fi
 
@@ -891,7 +956,7 @@ parse_code_args() {
         CODE_BACKUP_BEFORE_OPEN=1
         ;;
       --parallel|-p)
-        echo "code 是本机打开 VS Code，不支持并发参数。"
+        err "code 是本机打开 VS Code，不支持并发参数。"
         return 1
         ;;
       *)
@@ -909,7 +974,7 @@ parse_code_args() {
   done
 
   if [[ -z "${CODE_TARGET}" ]]; then
-    echo "用法: vps code <name> [path]"
+    err "用法: vps code <name> [path]"
     return 1
   fi
 
@@ -926,7 +991,7 @@ parse_backup_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --parallel|-p)
-        echo "backup 是单机操作，不支持并发参数。"
+        err "backup 是单机操作，不支持并发参数。"
         return 1
         ;;
       *)
@@ -944,7 +1009,7 @@ parse_backup_args() {
   done
 
   if [[ -z "${BACKUP_TARGET}" || -z "${BACKUP_PATH}" ]]; then
-    echo "用法: vps backup <name> <path>"
+    err "用法: vps backup <name> <path>"
     return 1
   fi
 
@@ -961,7 +1026,7 @@ parse_doctor_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --parallel|-p)
-        echo "doctor 是单机诊断，不支持并发参数。"
+        err "doctor 是单机诊断，不支持并发参数。"
         return 1
         ;;
       *)
@@ -979,7 +1044,7 @@ parse_doctor_args() {
   done
 
   if [[ -z "${DOCTOR_TARGET}" ]]; then
-    echo "用法: vps doctor <name> [service|container]"
+    err "用法: vps doctor <name> [service|container]"
     return 1
   fi
 
@@ -996,7 +1061,7 @@ parse_cbatch_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --parallel|-p)
-        echo "cbatch 是单机容器会话，不支持并发参数。"
+        err "cbatch 是单机容器会话，不支持并发参数。"
         return 1
         ;;
       *)
@@ -1014,7 +1079,7 @@ parse_cbatch_args() {
   done
 
   if [[ -z "${CBATCH_TARGET}" ]]; then
-    echo "用法: vps cbatch <name> [container]"
+    err "用法: vps cbatch <name> [container]"
     return 1
   fi
 
@@ -1030,7 +1095,7 @@ parse_containers_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --parallel|-p)
-        echo "containers 只查单台机器，不支持并发参数。"
+        err "containers 只查单台机器，不支持并发参数。"
         return 1
         ;;
       *)
@@ -1045,7 +1110,7 @@ parse_containers_args() {
   done
 
   if [[ -z "${CONTAINERS_TARGET}" ]]; then
-    echo "用法: vps containers <name>"
+    err "用法: vps containers <name>"
     return 1
   fi
 
@@ -1070,6 +1135,7 @@ print_add_usage() {
   port 默认 22
   key 默认 -，表示使用 ssh 默认密钥
   password 默认空；保存后可自动密码登录，copy-key 成功后会清空密码
+  直接把 password 写在命令行会进入 shell 历史和进程列表，建议交互隐藏输入。
 EOF
 }
 
@@ -1092,6 +1158,7 @@ print_password_usage() {
 
 说明:
   不传 password 时会隐藏输入。
+  直接把 password 写在命令行会进入 shell 历史和进程列表，不建议在共享机器上使用。
   执行 copy-key 成功后会自动清空保存的密码。
 EOF
 }
@@ -1107,15 +1174,15 @@ validate_config_name() {
   local value="$1"
 
   if [[ -z "${value}" ]]; then
-    echo "服务器名称不能为空。"
+    err "服务器名称不能为空。"
     return 1
   fi
   if [[ "${value}" == "all" ]]; then
-    echo "all 是批量目标保留字，别拿它当服务器名。"
+    err "all 是批量目标保留字，别拿它当服务器名。"
     return 1
   fi
   if ! [[ "${value}" =~ ^[A-Za-z0-9._-]+$ ]]; then
-    echo "服务器名称只能包含字母、数字、点、下划线和横线: ${value}"
+    err "服务器名称只能包含字母、数字、点、下划线和横线: ${value}"
     return 1
   fi
 }
@@ -1125,15 +1192,15 @@ validate_config_plain_field() {
   local value="$2"
 
   if [[ -z "${value}" ]]; then
-    echo "${label}不能为空。"
+    err "${label}不能为空。"
     return 1
   fi
   if [[ "${value}" == *"|"* || "${value}" == *$'\n'* || "${value}" == *$'\r'* ]]; then
-    echo "${label}不能包含 | 或换行。"
+    err "${label}不能包含 | 或换行。"
     return 1
   fi
   if [[ "${value}" =~ [[:space:]] ]]; then
-    echo "${label}不能包含空白字符: ${value}"
+    err "${label}不能包含空白字符: ${value}"
     return 1
   fi
 }
@@ -1143,17 +1210,17 @@ validate_config_key() {
   local expanded_key
 
   if [[ -z "${value}" ]]; then
-    echo "私钥路径不能为空，没指定就用 -。"
+    err "私钥路径不能为空，没指定就用 -。"
     return 1
   fi
   if [[ "${value}" == *"|"* || "${value}" == *$'\n'* || "${value}" == *$'\r'* ]]; then
-    echo "私钥路径不能包含 | 或换行。"
+    err "私钥路径不能包含 | 或换行。"
     return 1
   fi
   if [[ "${value}" != "-" ]]; then
     expanded_key="$(expand_home "${value}")"
     if [[ ! -f "${expanded_key}" ]]; then
-      echo "私钥文件不存在: ${expanded_key}"
+      err "私钥文件不存在: ${expanded_key}"
       return 1
     fi
   fi
@@ -1163,7 +1230,7 @@ validate_config_password() {
   local value="$1"
 
   if [[ "${value}" == *"|"* || "${value}" == *$'\n'* || "${value}" == *$'\r'* ]]; then
-    echo "密码不能包含 | 或换行。"
+    err "密码不能包含 | 或换行。"
     return 1
   fi
 }
@@ -1187,7 +1254,7 @@ validate_add_config_fields() {
   validate_config_plain_field "登录用户" "${ADD_USER}" || return 1
   validate_config_plain_field "主机/IP" "${ADD_HOST}" || return 1
   if ! [[ "${ADD_PORT}" =~ ^[0-9]+$ ]] || (( ADD_PORT < 1 || ADD_PORT > 65535 )); then
-    echo "端口不合法: ${ADD_PORT}"
+    err "端口不合法: ${ADD_PORT}"
     return 1
   fi
   validate_config_key "${ADD_KEY}" || return 1
@@ -1225,7 +1292,7 @@ prompt_add_config_fields() {
           echo
           ADD_PASSWORD="$(trim "${ADD_PASSWORD}")"
           [[ -n "${ADD_PASSWORD}" ]] && break
-          echo "密码不能为空。"
+          err "密码不能为空。"
         done
         read -r -p "是否立即写入公钥并改用密钥登录？[y/N]: " save_key_choice
         case "${save_key_choice}" in
@@ -1246,7 +1313,7 @@ prompt_add_config_fields() {
         break
         ;;
       *)
-        echo "请输入 1 或 2。"
+        err "请输入 1 或 2。"
         ;;
     esac
   done
@@ -1359,7 +1426,7 @@ parse_password_args() {
 
   PASSWORD_VALUE="$(trim "${PASSWORD_VALUE}")"
   if [[ -z "${PASSWORD_VALUE}" ]]; then
-    echo "密码不能为空。"
+    err "密码不能为空。"
     return 1
   fi
   validate_config_password "${PASSWORD_VALUE}" || return 1
@@ -1419,7 +1486,7 @@ post_add_copy_key_if_requested() {
     return 0
   fi
 
-  echo "公钥写入失败，已保留密码配置，可稍后执行: vps copy-key ${ADD_NAME}"
+  err "公钥写入失败，已保留密码配置，可稍后执行: vps copy-key ${ADD_NAME}"
   return 1
 }
 
@@ -1472,7 +1539,7 @@ delete_server_config() {
 
   if [[ "${removed}" -ne 1 ]]; then
     rm -f "${temp_file}"
-    echo "删除失败，配置没有变更。"
+    err "删除失败，配置没有变更。"
     return 1
   fi
 
@@ -1515,7 +1582,7 @@ update_server_auth_config() {
 
   if [[ "${updated}" -ne 1 ]]; then
     rm -f "${temp_file}"
-    echo "更新配置失败，没找到服务器: ${target}"
+    err "更新配置失败，没找到服务器: ${target}"
     return 1
   fi
 
@@ -1539,7 +1606,7 @@ get_containers_for_target() {
 
   capture_remote_command "${line}" "$(list_containers_command)" "serial"
   if [[ ${CAPTURED_REMOTE_STATUS} -ne 0 ]]; then
-    echo "读取容器列表失败: ${target}"
+    err "读取容器列表失败: ${target}"
     [[ -n "${CAPTURED_REMOTE_OUTPUT}" ]] && echo "${CAPTURED_REMOTE_OUTPUT}"
     return 1
   fi
@@ -1595,7 +1662,7 @@ select_container_for_target() {
   echo
   read -r -p "输入容器序号或容器名: " choice
   choice="$(trim "${choice}")"
-  [[ -z "${choice}" ]] && { echo "没输入容器。"; return 1; }
+  [[ -z "${choice}" ]] && { err "没输入容器。"; return 1; }
 
   if [[ "${choice}" =~ ^[0-9]+$ ]]; then
     if (( choice < 1 || choice > ${#CONTAINER_LINES[@]} )); then
@@ -1617,7 +1684,7 @@ select_container_for_target() {
     fi
   done
 
-  echo "没找到这个容器: ${choice}"
+  err "没找到这个容器: ${choice}"
   return 1
 }
 
@@ -1664,8 +1731,39 @@ run_parallel_batch() {
   local failed_total=0
   local line log_path status i
   local failed_list=""
+  local parallel_limit="${PARALLEL_LIMIT}"
+
+  if [[ ! "${parallel_limit}" =~ ^[0-9]+$ || "${parallel_limit}" -lt 1 ]]; then
+    parallel_limit=8
+  fi
 
   temp_dir="$(mktemp -d)"
+  cleanup_parallel_temp_dir() {
+    [[ -n "${temp_dir:-}" ]] && rm -rf "${temp_dir}"
+  }
+  trap cleanup_parallel_temp_dir EXIT INT TERM
+
+  wait_parallel_window() {
+    local status i
+    [[ ${#pids[@]} -eq 0 ]] && return 0
+    for ((i=0; i<${#pids[@]}; i++)); do
+      set +e
+      wait "${pids[$i]}"
+      status=$?
+      set -e
+      cat "${logs[$i]}"
+      if [[ ${status} -eq 0 ]]; then
+        ok_names+=("${names[$i]}")
+        ok_total=$((ok_total + 1))
+      else
+        failed_names+=("${names[$i]}")
+        failed_total=$((failed_total + 1))
+      fi
+    done
+    pids=()
+    names=()
+    logs=()
+  }
 
   for line in "${server_lines[@]}"; do
     parse_server "${line}"
@@ -1676,24 +1774,15 @@ run_parallel_batch() {
       run_remote_command "${line}" "${remote_cmd}" "parallel"
     ) >"${log_path}" 2>&1 &
     pids+=("$!")
-  done
-
-  for ((i=0; i<${#pids[@]}; i++)); do
-    set +e
-    wait "${pids[$i]}"
-    status=$?
-    set -e
-    cat "${logs[$i]}"
-    if [[ ${status} -eq 0 ]]; then
-      ok_names+=("${names[$i]}")
-      ok_total=$((ok_total + 1))
-    else
-      failed_names+=("${names[$i]}")
-      failed_total=$((failed_total + 1))
+    if [[ ${#pids[@]} -ge ${parallel_limit} ]]; then
+      wait_parallel_window
     fi
   done
 
-  rm -rf "${temp_dir}"
+  wait_parallel_window
+
+  cleanup_parallel_temp_dir
+  trap - EXIT INT TERM
   if [[ ${failed_total} -gt 0 ]]; then
     failed_list="$(join_by_comma "${failed_names[@]}")"
   fi
@@ -1713,6 +1802,11 @@ run_for_target() {
       server_lines+=("${line}")
     done < <(each_server)
 
+    if [[ ${#server_lines[@]} -eq 0 ]]; then
+      err "没有可用服务器。请先执行 ${APP_CMD} add 添加服务器，或检查配置文件: ${CONFIG_FILE}"
+      return 1
+    fi
+
     if [[ "${mode}" == "parallel" ]]; then
       run_parallel_batch "${remote_cmd}" "${server_lines[@]}"
     else
@@ -1722,7 +1816,7 @@ run_for_target() {
   fi
 
   if ! line="$(require_server_line "${target}")"; then
-    exit 1
+    return 1
   fi
   run_remote_command "${line}" "${remote_cmd}" "${mode}"
 }
@@ -1732,7 +1826,7 @@ ssh_into_server() {
   local line
 
   if ! line="$(require_server_line "${target}")"; then
-    exit 1
+    return 1
   fi
 
   parse_server "${line}"
@@ -1793,12 +1887,12 @@ copy_key() {
   pubkey="${key_file}.pub"
 
   if [[ ! -f "${key_file}" ]]; then
-    echo "没找到私钥: ${key_file}"
+    err "没找到私钥: ${key_file}"
     echo "先执行: ssh-keygen -t ed25519"
     exit 1
   fi
   if [[ ! -f "${pubkey}" ]]; then
-    echo "没找到公钥: ${pubkey}"
+    err "没找到公钥: ${pubkey}"
     echo "可执行: ssh-keygen -y -f \"${key_file}\" > \"${pubkey}\""
     exit 1
   fi
@@ -1816,7 +1910,7 @@ copy_key() {
   set -e
 
   if [[ ${copy_status} -ne 0 ]]; then
-    echo "公钥写入失败: ${SERVER_NAME}"
+    err "公钥写入失败: ${SERVER_NAME}"
     return "${copy_status}"
   fi
 
@@ -1855,6 +1949,7 @@ sync_ssh_config() {
   local backup_file
   local line
   local inside_block=0
+  local timestamp
 
   config_dir="$(dirname "${config_file}")"
   mkdir -p "${config_dir}"
@@ -1862,14 +1957,25 @@ sync_ssh_config() {
 
   tmp_file="$(mktemp)"
   new_file="$(mktemp)"
-  backup_file="${config_file}.bak"
+  timestamp="$(date +%Y%m%d%H%M%S)"
+  backup_file="${config_file}.bak.${timestamp}"
 
   while IFS= read -r line || [[ -n "${line}" ]]; do
     if [[ "${line}" == "${SSH_CONFIG_BEGIN}" ]]; then
+      if [[ ${inside_block} -eq 1 ]]; then
+        err "SSH 配置标记不成对: 重复出现 BEGIN 标记，已中止。"
+        rm -f "${tmp_file}" "${new_file}"
+        return 1
+      fi
       inside_block=1
       continue
     fi
     if [[ "${line}" == "${SSH_CONFIG_END}" ]]; then
+      if [[ ${inside_block} -eq 0 ]]; then
+        err "SSH 配置标记不成对: 出现孤立 END 标记，已中止。"
+        rm -f "${tmp_file}" "${new_file}"
+        return 1
+      fi
       inside_block=0
       continue
     fi
@@ -1877,6 +1983,12 @@ sync_ssh_config() {
       printf '%s\n' "${line}" >> "${tmp_file}"
     fi
   done < "${config_file}"
+
+  if [[ ${inside_block} -eq 1 ]]; then
+    err "SSH 配置标记不成对: BEGIN 后缺少 END，已中止。"
+    rm -f "${tmp_file}" "${new_file}"
+    return 1
+  fi
 
   cp "${config_file}" "${backup_file}"
   cat "${tmp_file}" > "${new_file}"
@@ -1915,7 +2027,7 @@ ensure_code_cli() {
     fi
   done
 
-  echo "没找到 VS Code 命令行工具。"
+  err "没找到 VS Code 命令行工具。"
   echo "已尝试: ${CODE_BIN}、code，以及常见 macOS 安装路径。"
   echo "你可以："
   echo "1. 在 VS Code 命令面板执行: Shell Command: Install 'code' command in PATH"
@@ -2019,7 +2131,7 @@ backup_remote_path() {
   resolved_path="$(resolve_remote_code_path "${target}" "${requested_path}")" || return 1
 
   if [[ "${resolved_path}" == "/" || "${resolved_path}" == "/root" || "${resolved_path}" == "/home" ]]; then
-    echo "这个路径太大了，不建议整目录直接备份: ${resolved_path}"
+    err "这个路径太大了，不建议整目录直接备份: ${resolved_path}"
     echo "请改成更具体的目录或文件，例如 /etc/nginx 或 /opt/app/.env"
     return 1
   fi
@@ -2049,8 +2161,8 @@ EOF
 
   capture_remote_command "${line}" "${backup_command}" "serial"
   if [[ ${CAPTURED_REMOTE_STATUS} -ne 0 ]]; then
-    echo "备份失败: ${target}:${resolved_path}"
-    [[ -n "${CAPTURED_REMOTE_OUTPUT}" ]] && echo "${CAPTURED_REMOTE_OUTPUT}"
+    err "备份失败: ${target}:${resolved_path}"
+    [[ -n "${CAPTURED_REMOTE_OUTPUT}" ]] && printf '%s\n' "${CAPTURED_REMOTE_OUTPUT}" >&2
     return 1
   fi
 
@@ -2091,11 +2203,11 @@ parse_ssh_config_args() {
         ;;
       --file)
         shift
-        [[ $# -gt 0 ]] || { echo "--file 后面要跟路径"; return 1; }
+        [[ $# -gt 0 ]] || { err "--file 后面要跟路径"; return 1; }
         SSH_CONFIG_TARGET_FILE="$(expand_home "$1")"
         ;;
       *)
-        echo "用法: vps ssh-config [sync|show] [--file path]"
+        err "用法: vps ssh-config [sync|show] [--file path]"
         return 1
         ;;
     esac
@@ -2115,6 +2227,51 @@ json_escape() {
   value="${value//$'\r'/\\r}"
   value="${value//$'\t'/\\t}"
   printf '%s' "${value}"
+}
+
+redact_doctor_report() {
+  VPSCTL_DOCTOR_REPORT_RAW="$1" python3 - <<'PY'
+import os
+import re
+
+text = os.environ.get("VPSCTL_DOCTOR_REPORT_RAW", "")
+
+text = re.sub(
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
+    "[REDACTED_PRIVATE_KEY]",
+    text,
+    flags=re.S,
+)
+
+sensitive_name = r"(?:password|passwd|pwd|token|secret|api[_-]?key|access[_-]?key|private[_-]?key|authorization|cookie)"
+text = re.sub(r"(?i)\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+", r"\1 [REDACTED]", text)
+text = re.sub(
+    r"(?i)\b(authorization|cookie)(\s*[:=]\s*)(.+)",
+    lambda m: f"{m.group(1)}{m.group(2)}[REDACTED]",
+    text,
+)
+text = re.sub(
+    rf"(?i)\b({sensitive_name})(\s*[:=]\s*)([^\s,;]+)",
+    lambda m: f"{m.group(1)}{m.group(2)}[REDACTED]",
+    text,
+)
+text = re.sub(
+    rf"(?i)([\"']{sensitive_name}[\"']\s*:\s*[\"'])(.*?)([\"'])",
+    lambda m: f"{m.group(1)}[REDACTED]{m.group(3)}",
+    text,
+)
+
+private_ipv4 = re.compile(
+    r"\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|"
+    r"192\.168\.\d{1,3}\.\d{1,3}|"
+    r"172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|"
+    r"127\.\d{1,3}\.\d{1,3}\.\d{1,3})\b"
+)
+text = private_ipv4.sub("[REDACTED_PRIVATE_IP]", text)
+text = re.sub(r"\b(?:localhost|ip6-localhost)\b", "[REDACTED_LOCALHOST]", text, flags=re.I)
+
+print(text, end="")
+PY
 }
 
 doctor_remote_script() {
@@ -2250,27 +2407,50 @@ call_ai_doctor() {
   local target="$1"
   local subject="$2"
   local report="$3"
-  local payload response status
+  local payload response status report_for_ai
 
   if [[ -z "${AI_API_KEY}" || -z "${AI_MODEL}" ]]; then
-    echo "未配置 AI 分析。可设置 VPSCTL_AI_API_KEY 和 VPSCTL_AI_MODEL 后重试。"
-    return 1
-  fi
-
-  if ! command -v curl >/dev/null 2>&1; then
-    echo "本机缺少 curl，AI 分析没法调用接口。"
+    err "未配置 AI 分析。可设置 VPSCTL_AI_API_KEY 和 VPSCTL_AI_MODEL 后重试。"
     return 1
   fi
 
   if ! command -v python3 >/dev/null 2>&1; then
-    echo "本机缺少 python3，暂时没法解析 AI 接口返回。"
+    err "本机缺少 python3，暂时没法解析 AI 接口返回。"
+    return 1
+  fi
+
+  report_for_ai="${report}"
+  if [[ "${VPSCTL_AI_DOCTOR_REDACT:-1}" != "0" ]]; then
+    report_for_ai="$(redact_doctor_report "${report}")"
+  fi
+
+  if [[ "${VPSCTL_AI_DOCTOR_ASSUME_YES:-}" != "1" ]]; then
+    if [[ -t 0 && -t 1 ]]; then
+      local confirm
+      echo "AI 分析会把诊断报告发送到外部接口: ${AI_API_URL}"
+      if [[ "${VPSCTL_AI_DOCTOR_REDACT:-1}" != "0" ]]; then
+        echo "将先进行基础脱敏；如需发送原始报告，可设置 VPSCTL_AI_DOCTOR_REDACT=0。"
+      fi
+      read -r -p "确认发送？输入 YES 继续: " confirm
+      if [[ "${confirm}" != "YES" ]]; then
+        err "已取消 AI 分析。"
+        return 1
+      fi
+    else
+      err "AI 分析需要确认会发送诊断信息到外部接口；非交互场景请设置 VPSCTL_AI_DOCTOR_ASSUME_YES=1。"
+      return 1
+    fi
+  fi
+
+  if ! command -v curl >/dev/null 2>&1; then
+    err "本机缺少 curl，AI 分析没法调用接口。"
     return 1
   fi
 
   payload="$(
     VPSCTL_DOCTOR_TARGET="${target}" \
     VPSCTL_DOCTOR_SUBJECT="${subject}" \
-    VPSCTL_DOCTOR_REPORT="${report}" \
+    VPSCTL_DOCTOR_REPORT="${report_for_ai}" \
     VPSCTL_DOCTOR_MODEL="${AI_MODEL}" \
     python3 - <<'PY'
 import json
@@ -2308,8 +2488,8 @@ PY
   set -e
 
   if [[ ${status} -ne 0 ]]; then
-    echo "AI 接口调用失败:"
-    echo "${response}"
+    err "AI 接口调用失败:"
+    err "${response}"
     return 1
   fi
 
@@ -2319,19 +2499,31 @@ import os
 import sys
 
 raw = os.environ.get("VPSCTL_DOCTOR_RESPONSE", "")
-data = json.loads(raw)
+try:
+    data = json.loads(raw)
+except json.JSONDecodeError as exc:
+    preview = raw[:500].replace("\n", "\\n")
+    print(f"AI 接口返回的内容不是 JSON: {exc}", file=sys.stderr)
+    if preview:
+        print(f"响应预览: {preview}", file=sys.stderr)
+    sys.exit(1)
+
 content = ""
 
-if isinstance(data, dict) and data.get("choices"):
-    message = data["choices"][0].get("message", {})
-    content = message.get("content", "")
-elif isinstance(data, dict) and data.get("output"):
-    chunks = []
-    for item in data["output"]:
-        for content_item in item.get("content", []):
-            if content_item.get("type") in ("output_text", "text"):
-                chunks.append(content_item.get("text", ""))
-    content = "\n".join(chunks)
+try:
+    if isinstance(data, dict) and data.get("choices"):
+        message = data["choices"][0].get("message", {})
+        content = message.get("content", "")
+    elif isinstance(data, dict) and data.get("output"):
+        chunks = []
+        for item in data["output"]:
+            for content_item in item.get("content", []):
+                if content_item.get("type") in ("output_text", "text"):
+                    chunks.append(content_item.get("text", ""))
+        content = "\n".join(chunks)
+except (AttributeError, IndexError, TypeError) as exc:
+    print(f"AI 接口响应结构无法识别: {exc}", file=sys.stderr)
+    sys.exit(1)
 
 if isinstance(content, list):
     text_parts = []
@@ -2342,7 +2534,12 @@ if isinstance(content, list):
           text_parts.append(item)
     content = "\n".join(text_parts)
 
-print(content.strip())
+content = content.strip()
+if not content:
+    print("AI 接口响应里没有可展示的分析内容。", file=sys.stderr)
+    sys.exit(1)
+
+print(content)
 PY
 }
 
@@ -2392,7 +2589,7 @@ validate_config() {
 
     field_count="$(awk -F'|' '{print NF}' <<<"${line}")"
     if [[ "${field_count}" -ne 5 && "${field_count}" -ne 6 ]]; then
-      echo "第 ${lineno} 行字段数量不对，应该是 5 或 6 段。"
+      err "第 ${lineno} 行字段数量不对，应该是 5 或 6 段。"
       errors=$((errors + 1))
       continue
     fi
@@ -2400,22 +2597,22 @@ validate_config() {
     parse_server "${line}"
 
     if [[ -z "${SERVER_NAME}" || -z "${SERVER_USER}" || -z "${SERVER_HOST}" ]]; then
-      echo "第 ${lineno} 行有空字段，名称、用户、主机都必须填。"
+      err "第 ${lineno} 行有空字段，名称、用户、主机都必须填。"
       errors=$((errors + 1))
     fi
 
     if ! [[ "${SERVER_PORT}" =~ ^[0-9]+$ ]] || (( SERVER_PORT < 1 || SERVER_PORT > 65535 )); then
-      echo "第 ${lineno} 行端口不合法: ${SERVER_PORT}"
+      err "第 ${lineno} 行端口不合法: ${SERVER_PORT}"
       errors=$((errors + 1))
     fi
 
     if [[ "${SERVER_KEY}" != "-" && ! -f "${SERVER_KEY}" ]]; then
-      echo "第 ${lineno} 行私钥文件不存在: ${SERVER_KEY}"
+      err "第 ${lineno} 行私钥文件不存在: ${SERVER_KEY}"
       errors=$((errors + 1))
     fi
 
     if ! validate_config_password "${SERVER_PASSWORD}" >/dev/null; then
-      echo "第 ${lineno} 行密码字段不合法，不能包含 | 或换行。"
+      err "第 ${lineno} 行密码字段不合法，不能包含 | 或换行。"
       errors=$((errors + 1))
     fi
 
@@ -2429,7 +2626,7 @@ validate_config() {
       done
     fi
     if [[ ${seen} -eq 1 ]]; then
-      echo "第 ${lineno} 行服务器名称重复: ${SERVER_NAME}"
+        err "第 ${lineno} 行服务器名称重复: ${SERVER_NAME}"
       errors=$((errors + 1))
     else
       seen_names+=("${SERVER_NAME}")
@@ -2438,7 +2635,7 @@ validate_config() {
   done < "${CONFIG_FILE}"
 
   if [[ ${seen_total} -eq 0 ]]; then
-    echo "配置文件里没有有效服务器。"
+    err "配置文件里没有有效服务器。"
     return 1
   fi
 
@@ -2447,7 +2644,7 @@ validate_config() {
     return 0
   fi
 
-  echo "配置校验失败，共发现 ${errors} 个问题。"
+  err "配置校验失败，共发现 ${errors} 个问题。"
   return 1
 }
 
@@ -2456,8 +2653,9 @@ confirm_reboot() {
   read -r -p "确认重启 ${target}？输入 YES 继续: " confirm
   if [[ "${confirm}" != "YES" ]]; then
     echo "已取消。"
-    exit 0
+    return 1
   fi
+  return 0
 }
 
 interactive_help() {
@@ -2520,8 +2718,8 @@ EOF
   disk            => df -h
   mem             => free -h
   ports           => ss -tulpn
-  restart-nginx   => sudo systemctl restart nginx
-  restart-docker  => sudo systemctl restart docker
+  restart-nginx   => sudo -n systemctl restart nginx
+  restart-docker  => sudo -n systemctl restart docker
 EOF
 }
 
@@ -2576,10 +2774,10 @@ batch_shortcut_command() {
       printf '%s\n' "ss -tulpn"
       ;;
     restart-nginx)
-      printf '%s\n' "sudo systemctl restart nginx"
+      printf '%s\n' "sudo -n systemctl restart nginx"
       ;;
     restart-docker)
-      printf '%s\n' "sudo systemctl restart docker"
+      printf '%s\n' "sudo -n systemctl restart docker"
       ;;
     *)
       return 1
@@ -2664,6 +2862,7 @@ batch_console() {
 
   BATCH_HISTORY_COUNT=0
   BATCH_HISTORY_ITEMS=()
+  mkdir -p "$(dirname "${HISTORY_FILE}")"
   : > "${HISTORY_FILE}"
 
   mode_label="${mode}"
@@ -2754,11 +2953,14 @@ menu() {
 
   while true; do
     print_menu
-    read -r -p "请输入编号: " choice
+    if ! read -r -p "请输入编号: " choice; then
+      echo
+      break
+    fi
     echo
     case "${choice}" in
       1)
-        list_servers
+        list_servers || true
         ;;
       a|A)
         prompt_add_config_fields
@@ -2767,50 +2969,51 @@ menu() {
       d|D)
         read -r -p "输入要删除的服务器名: " target
         target="$(trim "${target}")"
-        validate_config_name "${target}" && delete_server_config "${target}" "0"
+        validate_config_name "${target}" && delete_server_config "${target}" "0" || true
         ;;
       2)
-        run_for_target "all" "$(status_remote_script)" "serial"
+        run_for_target "all" "$(status_remote_script)" "serial" || true
         ;;
       3)
-        run_for_target "all" "$(check_remote_script)" "serial"
+        run_for_target "all" "$(check_remote_script)" "serial" || true
         ;;
       4)
-        run_for_target "all" "sudo apt update"
+        run_for_target "all" "sudo -n apt update" || true
         ;;
       5)
-        run_for_target "all" "sudo apt update && sudo apt -y upgrade"
+        run_for_target "all" "sudo -n apt update && sudo -n apt -y upgrade" || true
         ;;
       6)
         read -r -p "输入服务器名: " target
-        ssh_into_server "${target}"
+        ssh_into_server "${target}" || true
         ;;
       s|S)
         read -r -p "输入服务器名: " target
-        open_transmit_sftp "${target}"
+        open_transmit_sftp "${target}" || true
         ;;
       c|C)
         read -r -p "输入服务器名: " target
         read -r -p "输入远程目录（默认当前登录用户家目录，如 root=/root）: " remote_cmd
-        open_remote_in_code "${target}" "${remote_cmd}"
+        open_remote_in_code "${target}" "${remote_cmd}" || true
         ;;
       7)
         read -r -p "输入目标（服务器名或 all，默认 all）: " target
         target="${target:-all}"
-        batch_console "${target}" "serial" "host"
+        batch_console "${target}" "serial" "host" || true
         ;;
       u|U)
         read -r -p "输入目标（服务器名或 all）: " target
         read -r -p "输入要执行的命令: " remote_cmd
-        run_for_target "${target}" "${remote_cmd}"
+        run_for_target "${target}" "${remote_cmd}" || true
         ;;
       b|B)
         read -r -p "输入目标（服务器名或 all）: " target
-        confirm_reboot "${target}"
-        run_for_target "${target}" "sudo reboot"
+        target="${target:-all}"
+        confirm_reboot "${target}" || continue
+        run_for_target "${target}" "sudo -n reboot" || true
         ;;
       v|V)
-        validate_config
+        validate_config || true
         ;;
       i|I)
         print_version
@@ -2822,13 +3025,17 @@ menu() {
         break
         ;;
       *)
-        echo "请输入有效编号，别乱敲。"
+        err "请输入有效编号，别乱敲。"
         ;;
     esac
-    echo
-    read -r -n 1 -s -p "按任意键返回菜单..." _unused
-    echo
-    echo
+    if [[ -t 0 && -t 1 ]]; then
+      echo
+      read -r -n 1 -s -p "按任意键返回菜单..." _unused
+      echo
+      echo
+    else
+      echo
+    fi
   done
 }
 
@@ -2923,7 +3130,7 @@ main() {
   local cmd
   cmd="$(normalize_cmd "${original_cmd}")"
 
-  if [[ "${cmd}" == "add" || "${cmd}" == "help" || "${cmd}" == "version" ]]; then
+  if [[ "${cmd}" == "add" || "${cmd}" == "help" || "${cmd}" == "version" || "${cmd}" == "menu" ]]; then
     :
   elif [[ "${cmd}" == "del" && ( "${2:-}" == "--help" || "${2:-}" == "-h" ) ]]; then
     :
@@ -2963,7 +3170,7 @@ main() {
       save_server_password "${PASSWORD_TARGET}" "${PASSWORD_VALUE}"
       ;;
     ssh)
-      [[ $# -ge 2 ]] || { echo "用法: vps ssh <name>"; exit 1; }
+      [[ $# -ge 2 ]] || { err "用法: vps ssh <name>"; exit 1; }
       ssh_into_server "$2"
       ;;
     code)
@@ -2971,7 +3178,7 @@ main() {
       open_remote_in_code "${CODE_TARGET}" "${CODE_PATH}"
       ;;
     sftp)
-      [[ $# -ge 2 ]] || { echo "用法: vps sftp <name>"; exit 1; }
+      [[ $# -ge 2 ]] || { err "用法: vps sftp <name>"; exit 1; }
       open_transmit_sftp "$2"
       ;;
     backup)
@@ -3027,7 +3234,7 @@ main() {
           select_container_for_target "${CBATCH_TARGET}" || exit 1
           CBATCH_CONTAINER="${SELECTED_CONTAINER}"
         else
-          echo "用法: vps cbatch <name> [container]"
+          err "用法: vps cbatch <name> [container]"
           echo "非交互场景下请明确传容器名，或者先执行: vps containers <name>"
           exit 1
         fi
@@ -3036,18 +3243,18 @@ main() {
       ;;
     update)
       parse_target_mode_args "${@:2}" || exit 1
-      run_for_target "${PARSED_TARGET}" "sudo apt update" "${PARSED_MODE}"
+      run_for_target "${PARSED_TARGET}" "sudo -n apt update" "${PARSED_MODE}"
       ;;
     upgrade)
       parse_target_mode_args "${@:2}" || exit 1
-      run_for_target "${PARSED_TARGET}" "sudo apt update && sudo apt -y upgrade" "${PARSED_MODE}"
+      run_for_target "${PARSED_TARGET}" "sudo -n apt update && sudo -n apt -y upgrade" "${PARSED_MODE}"
       ;;
     reboot)
-      confirm_reboot "${2:-all}"
-      run_for_target "${2:-all}" "sudo reboot" "serial"
+      confirm_reboot "${2:-all}" || exit 0
+      run_for_target "${2:-all}" "sudo -n reboot" "serial"
       ;;
     copy-key)
-      [[ $# -ge 2 ]] || { echo "用法: vps copy-key <name>"; exit 1; }
+      [[ $# -ge 2 ]] || { err "用法: vps copy-key <name>"; exit 1; }
       copy_key "$2"
       ;;
     validate)
@@ -3063,7 +3270,7 @@ main() {
       interactive_help
       ;;
     *)
-      echo "不认识这个命令: ${original_cmd}"
+      err "不认识这个命令: ${original_cmd}"
       echo
       interactive_help
       exit 1

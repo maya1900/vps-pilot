@@ -3,6 +3,7 @@ setlocal
 
 set "SCRIPT_DIR=%~dp0"
 set "BASH_EXE="
+set "PROGRAMFILES_X86=%ProgramFiles(x86)%"
 
 where bash >nul 2>nul
 if %errorlevel%==0 (
@@ -13,8 +14,8 @@ if not defined BASH_EXE if exist "%ProgramFiles%\Git\bin\bash.exe" (
   set "BASH_EXE=%ProgramFiles%\Git\bin\bash.exe"
 )
 
-if not defined BASH_EXE if exist "%ProgramFiles(x86)%\Git\bin\bash.exe" (
-  set "BASH_EXE=%ProgramFiles(x86)%\Git\bin\bash.exe"
+if not defined BASH_EXE if defined PROGRAMFILES_X86 if exist "%PROGRAMFILES_X86%\Git\bin\bash.exe" (
+  set "BASH_EXE=%PROGRAMFILES_X86%\Git\bin\bash.exe"
 )
 
 if not defined BASH_EXE (

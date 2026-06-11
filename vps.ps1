@@ -12,7 +12,7 @@ if (-not $bash) {
     }
 }
 
-if (-not $bash -and $env:ProgramFiles -and $env:"ProgramFiles(x86)") {
+if (-not $bash -and $env:ProgramFiles -and ${env:ProgramFiles(x86)}) {
     $gitBashX86 = Join-Path ${env:ProgramFiles(x86)} "Git\bin\bash.exe"
     if (Test-Path $gitBashX86) {
         $bash = $gitBashX86
